@@ -453,47 +453,6 @@ class HoloAvatar:
                         max(-1.0, min(1.0, float(dy))),
                         self._t + max(0.1, float(hold)))
 
-    # ── posing ──────────────────────────────────────────────────────────────
-
-    def _pose(self):
-        """Jaw drop, brow lift and head rotation, applied to the real geometry."""
-        v = self._v
-        np.copyto(v, self._v0)
-
-        if self._brow > 0.004 or self._brow < -0.004:
-            # The brow-to-eye gap is 0.198 head-half-heights and a real raise
-            # moves a third of it. The old 0.045 — halved again by the landmark
-            # weights, which average 0.5 — worked out to six pixels on a 250 px
-            # head, which is to say invisible.
-            v[:, 1] += self._brow_w * (self._brow * _BROW_LIFT)
-
-        if abs(self._wide) > 0.01 and self._mouth > 0.0:
-            # Spread pulls the corners out and flattens the lips back; rounding
-            # draws them in and pushes them forward into a purse.
-            k = self._lips_w * (self._wide * self._mouth)
-            v[:, 0] += k * (v[:, 0] - self._lip_c[0]) * 0.55
-            v[:, 1] += k * (v[:, 1] - self._lip_c[1]) * 0.30
-            v[:, 2] -= k * 0.055
-
-        if self._mouth > 0.004:
-            px, py, pz = JAW_PIVOT
-            ang = self._jaw * (self._mouth * JAW_MAX)
-            ca, sa = np.cos(ang), np.sin(ang)
-            dy = v[:, 1] - py
-            dz = v[:, 2] - pz
-            v[:, 1] = py + dy * ca - dz * sa
-            v[:, 2] = pz + dy * sa + dz * ca
-
-        cy, sy = math.cos(self._yaw), math.sin(self._yaw)
-        cp, sp = math.cos(self._pitch), math.sin(self._pitch)
-        m = np.array([
-            [cy, 0.0, sy],
-            [sp * sy, cp, -sp * cy],
-            [-cp * sy, sp, cp * cy],
-        ], dtype=np.float32)
-
-        return v @ m.T, self._n0 @ m.T
-
     # ── rendering ───────────────────────────────────────────────────────────
 
     def _lut(self, bg: QColor, primary: QColor):
@@ -507,237 +466,164 @@ class HoloAvatar:
 
     def paint(self, p: QPainter, cx: float, cy: float, r: float,
               primary: QColor, accent: QColor, bg: QColor | None = None) -> None:
-        """Draw the avatar with its head centre at (cx, cy).
+        """Draw the geometric AI core with its centre at (cx, cy).
 
-        `r` is the head's half-height in pixels — the caller owns the layout, so
-        the HUD can fit the head to whatever room the status line leaves it.
+        `r` is the core's radius in pixels — the caller owns the layout.
         """
         if bg is None:
             bg = QColor(0, 0, 0)
-        amp = self._glow
-        verts, norms = self._pose()
 
-        # ── aura ────────────────────────────────────────────────────────────
-        ar = r * 1.95
-        grad = QRadialGradient(cx, cy, ar)
-        grad.setColorAt(0.00, _c(primary, 34 + 66 * amp))
-        grad.setColorAt(0.38, _c(primary, 20 + 40 * amp))
-        grad.setColorAt(1.00, _c(primary, 0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(grad))
-        p.drawEllipse(QRectF(cx - ar, cy - ar, ar * 2, ar * 2))
-
-        # ── project ─────────────────────────────────────────────────────────
-        w = _CAM_D - verts[:, 2]
-        np.maximum(w, 0.35, out=w)
-        k = (_CAM_D / w) * r
-        xs = cx + verts[:, 0] * k
-        ys = cy - verts[:, 1] * k
-
-        if self.shaded:
-            self._paint_surface(p, xs, ys, norms, verts, primary, bg, amp)
-        self._paint_wire(p, xs, ys, norms, verts, primary, bg, amp)
-        self._paint_features(p, xs, ys, norms, r, primary, accent, bg, amp)
-
-    def _paint_surface(self, p: QPainter, xs, ys, norms, verts,
-                       primary: QColor, bg: QColor, amp: float) -> None:
-        """Fill the camera-facing triangles so the head reads as a lit volume."""
-        a, b, c = self._fa, self._fb, self._fc
-
-        # Flat normals, taken from each triangle's own posed geometry — NOT the
-        # averaged vertex normals. Averaging smears the nose, lips and brow
-        # relief into their neighbours and renders the face as a blank egg;
-        # per-facet normals are exactly what makes the anatomy visible.
-        fn = np.cross(verts[b] - verts[a], verts[c] - verts[a])
-        fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
-
-        # Point them outwards by agreeing with the vertex normals, which were
-        # oriented at build time. Flipping on the sign of n_z instead would
-        # negate x and y as well and scramble the lighting into moiré.
-        ref = norms[a] + norms[b] + norms[c]
-        fn *= np.sign((fn * ref).sum(1))[:, None]
-
-        nz = fn[:, 2]
-        area = np.abs((xs[b] - xs[a]) * (ys[c] - ys[a])
-                      - (xs[c] - xs[a]) * (ys[b] - ys[a]))
-        vis = np.flatnonzero((nz > 0.015) & (area > 3.0))
-        if vis.size == 0:
-            return
-        fn = fn[vis]
-        nz = nz[vis]
-
-        ax, ay = xs[a][vis], ys[a][vis]
-        bx, by = xs[b][vis], ys[b][vis]
-        cxx, cyy = xs[c][vis], ys[c][vis]
-
-        # A rim term for the glass edge plus a key light high on the left. The
-        # light leans off-axis on purpose: weight it towards the camera and
-        # every front-facing facet returns the same value, which is a flat mask.
-        fres = np.clip(1.0 - nz, 0.0, 2.0) ** 1.7
-        lam = np.clip(fn[:, 0] * -0.55 + fn[:, 1] * 0.50 + nz * 0.52, 0.0, 1.0)
-        bright = 0.26 + 0.20 * fres + 0.66 * lam ** 1.05
-        bright *= (self._fade[a][vis] + self._fade[b][vis] + self._fade[c][vis]) / 3.0
-        bright *= 0.88 + 0.24 * amp
-
-        idx = np.clip((bright * _LUT_N).astype(np.int32), 0, _LUT_N - 1)
-
-        # Far facets first: the neck passes behind the jaw and the head is not
-        # convex around the chin.
-        # Sort far-to-near, but group first: neck facets all draw before head
-        # facets, because the two meshes interpenetrate and a pure depth sort
-        # interleaves them into a torn seam.
-        fz = (verts[a, 2][vis] + verts[b, 2][vis] + verts[c, 2][vis]) * (1.0 / 3.0)
-        order = np.argsort(self._fgroup[vis] * 1000.0 + fz, kind="stable")
-        tris = np.stack([ax, ay, bx, by, cxx, cyy], axis=1)[order].tolist()
-        shade = idx[order].tolist()
-        lut = self._lut(bg, primary)
-
-        # Aliased fills: adjacent antialiased polygons leave hairline seams, and
-        # the interior of a tiled surface has no silhouette worth smoothing —
-        # the antialiased wireframe drawn afterwards covers the outline.
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.setPen(Qt.PenStyle.NoPen)
-        for q, sh in zip(tris, shade):
-            p.setBrush(lut[sh])
-            p.drawPolygon(QPolygonF([QPointF(q[0], q[1]), QPointF(q[2], q[3]),
-                                     QPointF(q[4], q[5])]))
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-    def _paint_wire(self, p: QPainter, xs, ys, norms, verts,
-                    primary: QColor, bg: QColor, amp: float) -> None:
-        nz = norms[:, 2]
-        fres = np.abs(1.0 - np.abs(nz)) ** 1.5
-        if self.shaded:
-            # The lit surface underneath is opaque, so back-facing edges would
-            # float on top of the face — cull them and let the wire read as
-            # structure lines over skin.
-            front = nz > -0.05
-            va = np.where(front, 0.10 + 0.42 * fres, 0.0)
-            va += 0.30 * np.exp(-((verts[:, 1] - self._scan) / 0.13) ** 2) * front
-        else:
-            va = np.where(nz < 0.0, 0.13 + 0.26 * fres, 0.28 + 0.72 * fres)
-            va += 0.42 * np.exp(-((verts[:, 1] - self._scan) / 0.13) ** 2)
-        va *= self._fade * (0.80 + 0.45 * amp)
+        # Apply core offset/jitter from gaze
+        cx += self._gaze[0] * r * 0.02
+        cy += self._gaze[1] * r * 0.02
 
-        ea = 0.5 * (va[self._e0] + va[self._e1])
-        keep = np.flatnonzero(ea > _MIN_ALPHA)
-        if keep.size == 0:
-            return
+        # State-based color modulation
+        st = getattr(self, '_last_state', 'IDLE')
+        is_thinking = st in ("THINKING", "PROCESSING")
+        is_speaking = st == "SPEAKING"
+        is_listening = st == "LISTENING"
+        is_asleep = st in ("SLEEPING", "STANDBY", "OFFLINE")
+        is_error = st == "ERROR"
 
-        # Sort by opacity bucket once so each bucket is a contiguous *slice* of
-        # one QLineF list; masking and rebuilding per bucket cost more than the
-        # drawing itself.
-        bucket = np.clip((ea[keep] * _BUCKETS).astype(np.int32), 0, _BUCKETS - 1)
-        order = np.argsort(bucket, kind="stable")
-        keep = keep[order]
-        bounds = np.searchsorted(bucket[order], np.arange(_BUCKETS + 1))
+        # Base alpha modulated by glow and state
+        base_alpha = 0.4 + 0.6 * self._glow
+        if is_asleep:
+            base_alpha *= 0.3
+        elif is_error:
+            base_alpha = 0.8
 
-        e0, e1 = self._e0[keep], self._e1[keep]
-        quad = np.stack([xs[e0], ys[e0], xs[e1], ys[e1]], axis=1).tolist()
-        lines = [QLineF(q[0], q[1], q[2], q[3]) for q in quad]
-
-        skin = _blend(bg, primary, 132) if self.shaded else bg
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for b in range(_BUCKETS):
-            lo, hi = int(bounds[b]), int(bounds[b + 1])
-            if hi <= lo:
-                continue
-            seg = lines[lo:hi]
-            a = 255.0 * min(1.0, (b + 0.5) / _BUCKETS)
-            if self.shaded:
-                # These sit on lit skin, so pre-mix against a representative
-                # *skin* tone rather than the background — same fast opaque
-                # path, and the lines still read as highlights over the face.
-                p.setPen(QPen(_blend(skin, primary, a * 0.75), 1.0))
-            else:
-                p.setPen(QPen(_blend(bg, primary, a), 1.0))
-            p.drawLines(seg)
-
-    # ── face ────────────────────────────────────────────────────────────────
-
-    def _ring(self, xs, ys, idx) -> QPolygonF:
-        return QPolygonF([QPointF(float(x), float(y))
-                          for x, y in zip(xs[idx], ys[idx])])
-
-    def _paint_features(self, p: QPainter, xs, ys, norms, r: float,
-                        primary: QColor, accent: QColor, bg: QColor,
-                        amp: float) -> None:
-        """Eyes, brows and the mouth cavity, drawn from the real landmark rings.
-
-        The canonical model's eyes and lips are closed skin — the geometry gives
-        the *shape* of the lids and mouth but no opening, so the openings are
-        painted here, exactly on the landmarks that bound them.
-        """
-        face = max(0.0, math.cos(self._yaw) * math.cos(self._pitch)) ** 2
-        if face < 0.02:
-            return
-
-        lm = self._lm
-        vis = 1.0 - self._blink
-
-        # ── eyes ────────────────────────────────────────────────────────────
-        for key in ("eye_l", "eye_r"):
-            idx = lm[key]
-            ex, ey = xs[idx], ys[idx]
-            mid_y = float(ey.mean())
-            if vis < 0.999:
-                ey = mid_y + (ey - mid_y) * max(0.04, vis)
-            poly = QPolygonF([QPointF(float(a), float(b)) for a, b in zip(ex, ey)])
-
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(_blend(bg, primary, 22)))       # socket shadow
-            p.drawPolygon(poly)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(_c(primary, 210 * face), 1.3))      # lid line
-            p.drawPolygon(poly)
-
-            if vis > 0.35:
-                br = poly.boundingRect()
-                gx = br.center().x() + self._gaze[0] * br.width() * 0.16
-                gy = br.center().y() + self._gaze[1] * br.height() * 0.20
-                cpt = QPointF(gx, gy)
-                rad = min(br.height() * 0.62, br.width() * 0.20)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(_c(accent, (70 + 60 * amp) * face * vis)))
-                p.drawEllipse(cpt, rad, rad * vis)            # iris
-                p.setBrush(QBrush(_c(accent, 245 * face * vis)))
-                p.drawEllipse(cpt, rad * 0.42, rad * 0.42 * vis)   # pupil
-
-        # ── brows ───────────────────────────────────────────────────────────
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(_c(primary, 150 * face), 1.7))
-        for key in ("brow_l", "brow_r"):
-            idx = lm[key]
-            p.drawPolyline(self._ring(xs, ys, idx))
-
-        # ── mouth ───────────────────────────────────────────────────────────
-        inner = self._ring(xs, ys, lm["lips_in"])
-        open_h = inner.boundingRect().height()
-
+        # ─── 1. Background Aura / Glow ───
+        aura_radius = r * 1.8
+        aura_grad = QRadialGradient(cx, cy, aura_radius)
+        aura_grad.setColorAt(0.00, _c(primary, int(255 * 0.15 * base_alpha)))
+        aura_grad.setColorAt(0.40, _c(primary, int(255 * 0.06 * base_alpha)))
+        aura_grad.setColorAt(1.00, _c(primary, 0))
         p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(aura_grad))
+        p.drawEllipse(QRectF(cx - aura_radius, cy - aura_radius, aura_radius * 2, aura_radius * 2))
+
+        # ─── 2. Concentric Pulse Rings ───
+        for i in range(_NUM_RINGS):
+            ring = self._rings[i]
+            ring_r = ring[0] * r
+            intensity = ring[3] * base_alpha
+            if intensity <= 0.02:
+                continue
+            ring_alpha = int(255 * intensity * (0.3 + 0.7 * (1.0 - ring[0] / 1.5)))
+            pen = QPen(_c(primary, ring_alpha), max(1.0, 2.0 * (1.0 - ring[0] / 1.5)))
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), ring_r, ring_r)
+
+        # ─── 3. Rotating Arc Segments ───
+        for i in range(_NUM_ARCS):
+            arc = self._arcs[i]
+            start_deg = math.degrees(arc[0] + self._core_rotation)
+            span_deg = math.degrees(arc[1])
+            thickness = arc[3]
+            arc_alpha = int(255 * 0.6 * base_alpha * (0.5 + 0.5 * math.sin(arc[4])))
+            pen = QPen(_c(accent, arc_alpha), thickness)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(cx - r, cy - r, r * 2, r * 2),
+                      int(start_deg * 16), int(span_deg * 16))
+
+        # ─── 4. Orbiting Particles ───
+        for i in range(_NUM_PARTICLES):
+            pt = self._particles[i]
+            angle = pt[0] + self._core_rotation
+            radius = pt[1] * r
+            size = pt[3] * (0.5 + 0.5 * self._glow)
+            brightness = pt[5] * base_alpha
+            px = cx + radius * math.cos(angle)
+            py = cy + radius * math.sin(angle)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_c(accent, int(255 * brightness))))
+            p.drawEllipse(QPointF(px, py), size, size)
+
+        # ─── 5. Central Nucleus ───
+        nucleus_r = r * 0.15 * self._nucleus_pulse * (0.7 + 0.3 * self._glow)
+        nucleus_grad = QRadialGradient(cx, cy, nucleus_r * 2)
+        nuc_alpha_core = int(255 * (0.9 + 0.1 * self._glow))
+        nuc_alpha_edge = int(255 * 0.3 * base_alpha)
+        nucleus_grad.setColorAt(0.00, _c(primary, nuc_alpha_core))
+        nucleus_grad.setColorAt(0.50, _c(accent, nuc_alpha_edge))
+        nucleus_grad.setColorAt(1.00, _c(accent, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(nucleus_grad))
+        p.drawEllipse(QPointF(cx, cy), nucleus_r, nucleus_r)
+
+        # Nucleus core highlight
+        highlight_r = nucleus_r * 0.4
+        p.setBrush(QBrush(_c(QColor(255, 255, 255), int(200 * self._nucleus_pulse))))
+        p.drawEllipse(QPointF(cx - highlight_r * 0.3, cy - highlight_r * 0.3), highlight_r, highlight_r)
+
+        # ─── 6. State-Specific Indicators ───
+        # Speaking: outward pulse wave from nucleus
+        if is_speaking:
+            wave_r = r * (0.3 + 0.7 * self._mouth)
+            wave_alpha = int(255 * 0.4 * self._mouth * base_alpha)
+            pen = QPen(_c(primary, wave_alpha), max(1.5, 3.0 * self._mouth))
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), wave_r, wave_r)
+
+        # Listening: inward contracting ring
+        if is_listening and not is_speaking:
+            listen_r = r * (0.9 - 0.3 * self._glow)
+            listen_alpha = int(255 * 0.5 * (1.0 - self._glow) * base_alpha)
+            pen = QPen(_c(accent, listen_alpha), 2.0)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), listen_r, listen_r)
+
+        # Thinking: slow rotating indicator
+        if is_thinking:
+            think_angle = self._core_rotation * 2.0
+            for i in range(3):
+                a = think_angle + i * 2.094  # 120 degrees apart
+                tx = cx + r * 0.6 * math.cos(a)
+                ty = cy + r * 0.6 * math.sin(a)
+                t_alpha = int(255 * 0.6 * (0.5 + 0.5 * math.sin(self._core_rotation * 3 + i)) * base_alpha)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(_c(primary, t_alpha)))
+                p.drawEllipse(QPointF(tx, ty), 4, 4)
+
+        # Sleeping: very dim, slow pulse
+        if is_asleep:
+            sleep_alpha = int(255 * 0.15 * (0.5 + 0.5 * math.sin(self._core_rotation * 0.5)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_c(primary, sleep_alpha)))
+            p.drawEllipse(QPointF(cx, cy), r * 0.1, r * 0.1)
+
+        # Error: red pulsing ring
+        if is_error:
+            err_r = r * 1.1
+            err_alpha = int(255 * 0.7 * (0.5 + 0.5 * math.sin(self._t * 8.0)))
+            pen = QPen(_c(QColor("#ff3355"), err_alpha), 3.0)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), err_r, err_r)
+
+        # ─── 7. Energy Scan Line (vertical sweep) ───
+        if not is_asleep:
+            scan_y = cy + (self._scan / 1.55) * r
+            scan_alpha = int(255 * 0.3 * self._glow * base_alpha)
+            if scan_alpha > 5:
+                pen = QPen(_c(accent, scan_alpha), 1.0)
+                p.setPen(pen)
+                p.drawLine(QPointF(cx - r, scan_y), QPointF(cx + r, scan_y))
+
+        # ─── 8. Mouth/Viseme Indicator (subtle nucleus deformation) ───
         if self._mouth > 0.02:
-            # The cavity is dark but never pure black — a black oval on a glowing
-            # head reads as a hole, not a mouth. Tinting it with the theme keeps
-            # it part of the hologram.
-            p.setBrush(QBrush(_blend(bg, primary, 16 + 26 * self._mouth)))
-            p.drawPolygon(inner)
+            mouth_r = nucleus_r * (1.0 + 2.0 * self._mouth)
+            mouth_alpha = int(255 * 0.8 * self._mouth * base_alpha)
+            pen = QPen(_c(accent, mouth_alpha), 2.0)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), mouth_r, mouth_r * (1.0 - 0.3 * self._wide))
 
-            # Upper teeth: a bright strip hanging from the upper lip. It is the
-            # single cheapest thing that makes an open mouth look like speech.
-            ux, uy = xs[self._lip_up], ys[self._lip_up]
-            th = open_h * 0.30
-            pts = [QPointF(float(x), float(y)) for x, y in zip(ux, uy)]
-            pts += [QPointF(float(x), float(y) + th)
-                    for x, y in zip(ux[::-1], uy[::-1])]
-            p.setBrush(QBrush(_blend(bg, primary, 150 + 60 * self._mouth)))
-            p.drawPolygon(QPolygonF(pts))
-
-            # A warm pool at the back of the throat, strongest when wide open.
-            p.setBrush(QBrush(_c(accent, 40 * self._mouth * face)))
-            p.drawPolygon(inner)
-
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(_c(primary, (150 + 70 * self._mouth) * face), 1.3))
-        p.drawPolygon(inner)                       # lip edge
-        p.setPen(QPen(_c(primary, 110 * face), 1.1))
-        p.drawPolygon(self._ring(xs, ys, lm["lips_out"]))
+        # Store state for next frame
+        self._last_state = st
