@@ -1,26 +1,19 @@
 """
-Holographic AI head for the HUD centre — the thing that used to be a ring stack
-with the assistant's name in the middle.
+Geometric AI Core for the HUD centre — a living, breathing nucleus of light.
 
 Design notes
 ------------
-* **The face is real human geometry.** `core.avatar_mesh` builds the head around
-  MediaPipe's canonical face model, so eyelids, nostrils, lips and cheekbones
-  are measured anatomy rather than fitted curves. This renderer's whole job is
-  to light it, pose it and animate it.
-* **Software rendered, on purpose.** Everything is QPainter, so there is no
-  OpenGL context, no shader compile, no GPU driver to disagree with us and no
-  new pip dependency. It looks the same on a gaming rig, a 2013 laptop, a VM
-  and a remote desktop session.
-* **Lip-sync comes from the audio pipeline, not from the avatar.** `main.py`
-  already computes a real RMS level off the PCM (`_pcm_level`) for both the mic
-  and JARVIS's own output. The avatar just consumes that number, so there is no
-  second audio path to fall out of sync. The mouth only tracks the level while
-  JARVIS is *speaking* — during listening the same level drives the aura, so the
-  head never lip-syncs to the user's voice.
+* **Abstract geometric form.** No anatomical mesh — a pulsing, layered core
+  of concentric rings, orbiting particles, and a central energy nucleus.
+* **Software rendered, on purpose.** Pure QPainter + numpy math. Zero GPU
+  dependencies, runs identically everywhere.
+* **Audio-reactive by design.** The same audio pipeline (`_pcm_level`, visemes)
+  drives the core's pulse, ring expansion, particle velocity, and nucleus glow.
+* **State-expressive.** Distinct visual modes for LISTENING, THINKING, SPEAKING,
+  SLEEPING, ERROR — all derived from the existing animation state machine.
 
-The renderer is theme-agnostic: `paint()` takes its colours as arguments, which
-is what lets the HueWheel accent picker retint the avatar for free.
+The renderer is theme-agnostic: `paint()` takes colours as arguments, compatible
+with the existing HueWheel accent picker.
 """
 
 from __future__ import annotations
@@ -31,8 +24,6 @@ import random
 import numpy as np
 from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QRadialGradient
-
-from core.avatar_mesh import JAW_MAX, JAW_PIVOT, get_head_mesh
 
 # Perspective camera distance in head-half-heights. Large enough that the nose
 # does not balloon, small enough to keep a sense of depth.
@@ -82,6 +73,14 @@ _MIC_FLOOR = 0.14
 # at any speaker volume.
 _CLOSE_FRAC = 0.10
 
+# ─── Geometric Core Constants ───
+_NUM_RINGS = 5           # concentric pulse rings
+_NUM_PARTICLES = 32      # orbiting energy particles
+_NUM_ARCS = 3            # rotating arc segments
+_PARTICLE_BASE_SPEED = 0.15
+_RING_BASE_SPEED = 0.08
+_ARC_BASE_SPEED = 0.12
+
 
 def _rate(dt: float, tau: float) -> float:
     """Per-frame lerp factor for an exponential approach with time constant
@@ -98,13 +97,7 @@ def _c(col: QColor, a: float) -> QColor:
 
 
 def _blend(bg: QColor, col: QColor, a: float) -> QColor:
-    """`col` at alpha `a` pre-mixed onto `bg`, returned fully **opaque**.
-
-    Qt's raster engine has a fast path for opaque antialiased lines and a much
-    slower blended path for everything else — measured at 1.0 ms versus 2.9 ms
-    for the same 780 lines. The HUD paints a flat background behind the avatar,
-    so mixing the alpha in by hand is visually equivalent and three times cheaper.
-    """
+    """`col` at alpha `a` pre-mixed onto `bg`, returned fully **opaque**."""
     f = max(0.0, min(1.0, a / 255.0))
     return QColor(int(bg.red() + (col.red() - bg.red()) * f),
                   int(bg.green() + (col.green() - bg.green()) * f),
@@ -112,96 +105,93 @@ def _blend(bg: QColor, col: QColor, a: float) -> QColor:
 
 
 class HoloAvatar:
-    """Animated holographic head. One instance per HUD canvas.
+    """Animated geometric AI core. One instance per HUD canvas.
 
     Lifecycle:
         av = HoloAvatar()
-        av.step(dt, amp, speaking=..., muted=...)          # once per tick
-        av.paint(painter, cx, cy, r, primary, accent, bg)  # once per frame
+        av.step(dt, amp, speaking=..., muted=..., state=...)  # once per tick
+        av.paint(painter, cx, cy, r, primary, accent, bg)      # once per frame
     """
 
-    # Look: True paints a lit, solid head with a wireframe over it; False is a
-    # see-through glass wireframe. Flip here, or per instance.
-    shaded = True
-
     def __init__(self) -> None:
-        mesh = get_head_mesh()
-        self._v0 = mesh["verts"]
-        self._n0 = mesh["normals"]
-        self._jaw = mesh["jaw"]
-        self._brow_w = mesh["brow"]
-        self._lips_w = mesh["lips"]
-        self._lip_c = mesh["lip_centre"]
-        self._fade = mesh["fade"]
-        self._f = mesh["faces"]
-        self._fgroup = mesh["face_group"]
-        self._fa, self._fb, self._fc = (self._f[:, i] for i in range(3))
-        self._e0 = mesh["edges"][:, 0]
-        self._e1 = mesh["edges"][:, 1]
-        self._lm = mesh["landmarks"]
-        # The inner-lip ring runs lower-lip left→right, then upper-lip back.
-        # Splitting it lets the upper arc anchor a strip of teeth, which is what
-        # keeps an open mouth from reading as a hole punched in the face.
-        lips_in = mesh["landmarks"]["lips_in"]
-        self._lip_up = np.concatenate([lips_in[10:], lips_in[:1]])
+        # ─── Geometric Core State ───
+        # Concentric pulse rings
+        self._rings = np.zeros((_NUM_RINGS, 4), dtype=np.float32)  # radius, speed, phase, intensity
+        for i in range(_NUM_RINGS):
+            self._rings[i] = [0.15 + i * 0.18, _RING_BASE_SPEED * (1.0 + i * 0.3), random.uniform(0, 2*math.pi), 0.0]
 
-        # Crown (+1.0) down to the bottom of the neck, in head-half-heights.
-        # Callers size the head to the room they have with this.
-        self.SPAN = mesh["span"][0] - mesh["span"][1]
+        # Orbiting energy particles
+        self._particles = np.zeros((_NUM_PARTICLES, 6), dtype=np.float32)  # angle, radius, speed, size, phase, brightness
+        for i in range(_NUM_PARTICLES):
+            self._particles[i] = [
+                random.uniform(0, 2*math.pi),      # angle
+                random.uniform(0.35, 0.95),        # radius (normalized)
+                _PARTICLE_BASE_SPEED * random.uniform(0.5, 1.8) * random.choice([-1, 1]),  # speed
+                random.uniform(1.5, 4.0),          # size
+                random.uniform(0, 2*math.pi),      # phase
+                random.uniform(0.3, 1.0)           # brightness
+            ]
 
-        self._lut_cache: list = []
-        self._lut_key = None
+        # Rotating arc segments
+        self._arcs = np.zeros((_NUM_ARCS, 5), dtype=np.float32)  # start_angle, span, speed, thickness, phase
+        for i in range(_NUM_ARCS):
+            self._arcs[i] = [
+                random.uniform(0, 2*math.pi),      # start_angle
+                random.uniform(0.4, 1.2),          # span (radians)
+                _ARC_BASE_SPEED * random.uniform(0.7, 1.4) * random.choice([-1, 1]),  # speed
+                random.uniform(2.0, 5.0),          # thickness
+                random.uniform(0, 2*math.pi)       # phase
+            ]
 
-        n = self._v0.shape[0]
-        self._v = np.empty((n, 3), dtype=np.float32)
+        # Nucleus pulse
+        self._nucleus_phase = 0.0
+        self._nucleus_pulse = 0.0
 
+        # Core rotation (slow idle rotation)
+        self._core_rotation = 0.0
+
+        # ─── Preserved Animation State (from original) ───
         self._t = 0.0
-        self._sway = 0.0           # integrated sway phase — see step()
+        self._sway = 0.0
         self._yaw = 0.0
         self._pitch = 0.0
-        self._mouth = 0.0          # 0..1 smoothed jaw opening
+        self._mouth = 0.0          # 0..1 smoothed "mouth" opening (now maps to core expansion)
         self._glow = 0.0           # 0..1 smoothed overall energy
-        self._scan = -1.6          # vertical position of the energy sweep
-        self._blink = 0.0          # 0 = open, 1 = shut
+        self._scan = -1.6
+        self._blink = 0.0
         self._blink_at = 3.0
 
-        # ── expression ──────────────────────────────────────────────────────
-        # Speech is not just a moving jaw. Brows ride the loudness envelope,
-        # eyes widen with the brows, and the gaze flicks between fixation
-        # points — those three are what make it read as talking rather than as
-        # a puppet chewing.
+        # Expression state (repurposed for core reactivity)
         self._amp_slow = 0.0
         self._expr = 0.0
         self._expr_tgt = 0.0
         self._expr_at = 0.0
-        self._brow = 0.0           # smoothed brow lift, -0.4 .. 1.2
-        self._emph = 0.0           # syllable emphasis, drives the head nod
-        self._gaze = [0.0, 0.0]
+        self._brow = 0.0           # now maps to ring intensity bias
+        self._emph = 0.0           # syllable emphasis, drives core pulse
+        self._gaze = [0.0, 0.0]    # repurposed as core offset/jitter
         self._gaze_tgt = [0.0, 0.0]
         self._gaze_at = 0.0
 
-        # ── state expression ────────────────────────────────────────────────
-        # The face is the fastest status indicator in the app: you read a gaze
-        # before you read a word. Saccades orbit a bias that the assistant's
-        # state moves — eyes off to the side while it thinks, back on you while
-        # it listens, lids low while it sleeps.
+        # State expression
         self._gaze_bias = [0.0, 0.0]
         self._bias_tgt = [0.0, 0.0]
         self._bias_at = 0.0
-        self._lids = 1.0           # 1 = wide, 0 = shut; low while asleep
-        self._brow_bias = 0.0      # concentration pulls the brows down
-        self._glance = None        # (dx, dy, until_t) — a deliberate look
+        self._lids = 1.0
+        self._brow_bias = 0.0
+        self._glance = None
 
-        # ── viseme ──────────────────────────────────────────────────────────
-        # Loudness alone only answers "how far open", which is why an RMS-driven
-        # mouth flaps rather than speaks. These two carry the *shape*: how open
-        # the jaw is for this sound, and whether the lips are spread (/i/) or
-        # rounded (/u/). They come from a formant read of the audio actually
-        # being played — see `_pcm_visemes` in main.py.
+        # Viseme (repurposed for core shape modulation)
         self._v_open = 1.0
         self._v_wide = 0.0
-        self._wide = 0.0           # smoothed lip spread, -1 round .. +1 spread
-        self._v_peak = 0.18        # running estimate of this voice's loud level
+        self._wide = 0.0
+        self._v_peak = 0.18
+
+        # Lut cache for color ramps (preserved from original)
+        self._lut_cache: list = []
+        self._lut_key = None
+
+        # Span for sizing (preserved API compatibility)
+        self.SPAN = 2.0  # normalized units
 
     # ── animation ───────────────────────────────────────────────────────────
 
@@ -414,6 +404,44 @@ class HoloAvatar:
                 self._blink = 1.0
                 gap = 5.5 if thinking else 3.4
                 self._blink_at = t + gap + 3.1 * random.random()
+
+        # ─── Geometric Core Updates ───
+        # Core rotation (slow idle)
+        self._core_rotation += dt * 0.08 * (0.5 if asleep else 1.0)
+
+        # Nucleus pulse - tied to glow and emphasis
+        self._nucleus_phase += dt * (2.0 + 3.0 * self._glow + 2.0 * self._emph)
+        self._nucleus_pulse = 0.5 + 0.5 * math.sin(self._nucleus_phase)
+
+        # Update rings - expand and fade based on glow/emphasis
+        for i in range(_NUM_RINGS):
+            ring = self._rings[i]
+            ring[0] += dt * ring[1] * (1.0 + 2.0 * self._glow)  # radius expansion
+            ring[2] += dt * ring[1] * 0.5  # phase
+            # Intensity pulses with glow and emphasis
+            target_intensity = 0.3 + 0.7 * self._glow + 0.5 * self._emph
+            ring[3] += (target_intensity - ring[3]) * _rate(dt, 0.15)
+            # Reset ring when it expands beyond bounds
+            if ring[0] > 1.5:
+                ring[0] = 0.15 + i * 0.18
+                ring[3] = 0.0
+
+        # Update particles - orbit with speed modulation
+        for i in range(_NUM_PARTICLES):
+            p = self._particles[i]
+            p[0] += dt * p[2] * (1.0 + self._glow)  # angle
+            p[4] += dt * 1.5  # phase for brightness pulsing
+            p[5] = 0.3 + 0.7 * (0.5 + 0.5 * math.sin(p[4])) * (0.5 + 0.5 * self._glow)  # brightness
+
+        # Update arcs - rotate with state-dependent speed
+        for i in range(_NUM_ARCS):
+            a = self._arcs[i]
+            a[0] += dt * a[2] * (1.5 if thinking else (0.5 if asleep else 1.0))
+            a[4] += dt * 0.8
+
+        # Core offset/jitter from gaze (repurposed)
+        self._gaze[0] *= 0.95
+        self._gaze[1] *= 0.95
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Look deliberately somewhere for `hold` seconds, then wander again.
