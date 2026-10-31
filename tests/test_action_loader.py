@@ -1,8 +1,8 @@
 """Testes para core.action_loader.py — validacao, metadados e normalizacao de nomes."""
 from core.action_loader import (
-    META_KEYS,
     _BEHAVIORS,
     _SCHEDULING,
+    META_KEYS,
     _opt_text,
     _opt_tier,
     _opt_upper,
