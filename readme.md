@@ -1,6 +1,7 @@
 # 🧠 Jarvis-Code - Assistente Virtual Inteligente
 
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
+![CI](https://img.shields.io/github/actions/workflow/status/CaioStack/jarvis-code/ci.yml?branch=main)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status: Em Desenvolvimento](https://img.shields.io/badge/Status-Em%20Desenvolvimento-brightgreen.svg)
 
@@ -15,26 +16,59 @@
 * ⚡ **Ações Customizadas:** Definição de fluxos de trabalho e comandos específicos que a IA pode executar no sistema operacional ou na web.
 * 🖥️ **Interface Própria (`ui.py` e `dashboard`):** Interface visual e painel de controle para monitoramento, configuração e interação com o núcleo da IA.
 
+## 🏗️ Arquitetura
+
+### Duas maneiras de conversar
+
+O Jarvis-Code pode falar com um modelo de duas formas, e o restante do aplicativo (avatar, memória, desfazer, ações, plugins, painel) não sabe qual delas está em uso:
+
+1. **Gemini Live (direto)** — um único soquete leva áudio de entrada, áudio de saída, transcrições e chamadas de ferramenta juntos; o servidor decide quando o turno termina. É o caminho de menor latência (cerca de 0,3–0,6 s).
+2. **Pipeline local (STT → LLM → TTS)** — `providers/engine_pipeline.py` monta reconhecimento de fala, modelo de linguagem e síntese de voz atrás da mesma interface que a sessão Live usa. É o caminho que continua funcionando sem cota da API, com a rede fora ou com áudio que não pode sair do computador. Custa cerca de 1,5–4 s por turno porque as três etapas ocorrem em série.
+
+### O que o pipeline local faz
+
+* **Fim de turno pelo áudio** — o detetor de atividade de voz (VAD) mede o ruído ambiente continuamente e encerra o turno quando o silêncio dura cerca de 700 ms, depois de um mínimo de fala. Nada é transcrito enquanto a pessoa ainda fala.
+* **Filtro de raciocínio** — modelos locais (qwen3, deepseek-r1 e distilações) pensam em voz alta dentro de blocos de raciocínio; o filtro remove esses blocos antes de falar, registrar no log ou gravar no histórico, para o assistente não ler o próprio raciocínio em voz alta.
+* **Orçamento de histórico** — como uma API de chat sem estado não comprime o contexto, o pipeline guarda uma janela de caracteres (padrão: 24.000) das trocas recentes, sem cortar no meio de uma troca.
+* **Chamadas de ferramenta seguras** — chamadas repetidas com os mesmos argumentos são respondidas com o resultado da primeira vez (evita, por exemplo, abrir o WhatsApp quatro vezes) e um turno encerra depois de no máximo quatro rodadas de ferramenta, para um modelo que vagueia não travar a conversa.
+* **Voz por idioma** — a TTS recebe o idioma detectado na fala quando a voz suporta. Emojis são removidos apenas do que é falado, nunca do log nem do histórico.
+
+### Ações e plugins
+
+Novas capacidades chegam sem tocar no núcleo:
+
+* **Ações** (`core/action_loader.py`, pasta `actions/`) — declarações com metadados (`tier`, `brief`) carregadas automaticamente; cada ação registra como se desfaz.
+* **Plugins** (`core/plugin_loader.py`, pasta `plugins/`) — extensões isoladas; cada qual importa suas dependências apenas no momento de uso, para um plugin sem dependências instaladas não impedir o resto do aplicativo.
+
+### Desfazer
+
+`core/undo.py` mantém uma pilha compartilhada (`push_undo`, `undo_last`, `peek`, `history`, `clear`, profundidade 10): o assistente age imediatamente e registra como reverter, então "desfaz isso" reverte efetivamente a última ação.
+
+### Fluxo de um turno
+
+Microfone bufferizado → fim de turno (VAD ou soltar o push-to-talk) → STT transcreve → é emitido como "Você: ..." → o modelo responde frase a frase, e cada frase já é enviada para a voz enquanto chega → se o modelo chamar uma ferramenta, o aviso ("um instante") é falado antes, a ferramenta roda e o resultado volta ao histórico. O turno só termina quando a resposta chega ao fim.
+
 ## 📂 Estrutura do Projeto
 
 Abaixo está o mapeamento exato da arquitetura do projeto:
 
 ```text
 📦 jarvis-code
- ┣ 📂 actions/         # Scripts e funções de ações que a IA pode tomar
- ┣ 📂 config/          # Arquivos de configuração e variáveis de ambiente
- ┣ 📂 core/            # O cérebro do Jarvis-Code: orquestração e processamento
- ┣ 📂 dashboard/       # Arquivos do painel de monitoramento web/local
- ┣ 📂 memory/          # Módulos de persistência de dados e contexto
- ┣ 📂 plugins/         # Extensões para adicionar novas habilidades isoladas
- ┣ 📂 providers/       # Conectores para APIs externas de LLM e TTS/STT
- ┣ 📂 __pycache__/     # (Gerado automaticamente pelo Python, ignorar no git)
+ ┣ 📂 actions/         # Declarações de ações que a IA pode executar
+ ┣ 📂 config/          # Configuração (api_keys.json não é versionado; veja api_keys.example.json)
+ ┣ 📂 core/            # Cérebro: orquestração, desfazer, carregador de ações/plugins
+ ┣ 📂 dashboard/       # Painel de controle remoto (FastAPI)
+ ┣ 📂 memory/          # Persistência de contexto e memória
+ ┣ 📂 plugins/         # Extensões de habilidades isoladas
+ ┣ 📂 providers/       # Conectores de LLM, TTS/STT e o pipeline local
+ ┣ 📂 tests/           # Testes pytest (desfazer, schema, carregador de ações)
+ ┣ 📂 .github/         # Integração contínua (CI)
  ┣ 📜 LICENSE          # Termos de licença de uso do software
- ┣ 📜 main.py          # Ponto de entrada principal do núcleo da aplicação
+ ┣ 📜 main.py          # Ponto de entrada do núcleo da aplicação
+ ┣ 📜 pyproject.toml   # Empacotamento e metadados do projeto
  ┣ 📜 readme.md        # Documentação principal do projeto
- ┣ 📜 requirements.txt # Lista de bibliotecas e dependências
- ┣ 📜 setup.py         # Script para instalação e empacotamento do projeto
- ┗ 📜 ui.py            # Ponto de entrada focado na Interface de Usuário
+ ┣ 📜 requirements.txt # Lista de bibliotecas e dependências (marcadas por SO)
+ ┗ 📜 ui.py            # Interface do usuário (PyQt6)
 ```
 
 ## 🚀 Como Iniciar
