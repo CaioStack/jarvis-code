@@ -51,6 +51,5 @@ screenshots/
 
 # ──────────────────────────────────────────────────────────────────────────────
 
- config/api_keys.json
 *.json
 !config/api_keys.example.json
