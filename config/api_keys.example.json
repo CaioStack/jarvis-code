@@ -1,0 +1,69 @@
+{
+  "llm_provider": "gemini",
+  "llm_url": "https://generativelanguage.googleapis.com",
+  "llm_model": "gemini-2.0-flash",
+
+  "gemini_api_key": "SUA_CHAVE_API_DO_GEMINI_AQUI",
+
+  "providers": {
+    "llm_openai": {
+      "api_key": "sk-...",
+      "base_url": "http://localhost:1234/v1"
+    },
+    "stt_whisper": {
+      "model": "base",
+      "compute_type": "int8",
+      "language": "pt"
+    },
+    "tts_piper": {
+      "voice": "pt_BR-havana_low.onnx",
+      "download_dir": "voices"
+    },
+    "tts_elevenlabs": {
+      "api_key": "sk_...",
+      "voice_id": "21m00Tcm4TlvDq8ikWAM"
+    },
+    "tts_system": {},
+    "engine_pipeline": {}
+  },
+
+  "plugins": {
+    "gmail_control": {
+      "client_id": "SEU_CLIENT_ID_DO_GOOGLE_CLOUD",
+      "client_secret": "SEU_CLIENT_SECRET_DO_GOOGLE_CLOUD",
+      "redirect_uri": "http://localhost:8080/callback"
+    },
+    "calendar_control": {
+      "client_id": "SEU_CLIENT_ID_DO_GOOGLE_CLOUD",
+      "client_secret": "SEU_CLIENT_SECRET_DO_GOOGLE_CLOUD",
+      "redirect_uri": "http://localhost:8080/callback"
+    },
+    "home_assistant": {
+      "tuya_api_key": "SUA_CHAVE_TUYA",
+      "tuya_api_secret": "SEU_SEGREDO_TUYA",
+      "tuya_device_id": "ID_DO_DISPOSITIVO_TUYA"
+    },
+    "printer_control": {
+      "mqtt_broker": "localhost",
+      "mqtt_port": 1883,
+      "mqtt_user": "usuario",
+      "mqtt_password": "senha"
+    }
+  },
+
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "secret_key": "TROQUE_ESTA_CHAVE_SECRETA_DE_PRODUCAO"
+  },
+
+  "wake_word": {
+    "enabled": false,
+    "model": "hey_jarvis"
+  },
+
+  "briefing": {
+    "enabled": true,
+    "time": "08:00"
+  }
+}
