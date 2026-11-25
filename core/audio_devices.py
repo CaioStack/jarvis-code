@@ -327,8 +327,8 @@ def prefetch() -> None:
         result = _query()
         with _cache_lock:
             _cache = result
-        print(f"[Audio] {len(result['input'])} input / "
-              f"{len(result['output'])} output devices found")
+        print(f"[SYS] [Audio] {len(result['input'])} inputs / "
+              f"{len(result['output'])} outputs encontrados")
     threading.Thread(target=_work, daemon=True, name="audio-devices").start()
 
 
