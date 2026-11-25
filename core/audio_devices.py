@@ -620,7 +620,7 @@ def _endpoint_for(name: str):
                 partial = endpoint
         return exact or partial
     except Exception as e:
-        print(f"[Audio] per-device volume unavailable: {e}")
+        print(f"[SYS] [Audio] Volume por dispositivo indisponível: {e}")
     return None
 
 
