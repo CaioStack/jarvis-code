@@ -685,5 +685,5 @@ def set_output_volume(percent: int, name: str = "") -> bool:
         now = volume_get()
         return now is None or abs(now - percent) <= 3
     except Exception as e:
-        print(f"[Audio] could not set the output volume: {e}")
+        print(f"[SYS] [Audio] Não foi possível definir volume de saída: {e}")
         return False
