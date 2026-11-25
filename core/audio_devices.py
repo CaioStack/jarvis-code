@@ -147,9 +147,8 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
             st.stop(); st.close()
             ok = elapsed > secs * 0.5
             if not ok:
-                print(f"[Audio] output: host API reports success but moves no "
-                      f"audio ({elapsed*1000:.0f} ms for {secs*1000:.0f} ms) "
-                      f"— skipping it")
+                print(f"[SYS] [Audio] Probe de output falhou: API reporta sucesso mas não move áudio "
+                      f"({elapsed*1000:.0f} ms de {secs*1000:.0f} ms) — ignorando")
         else:
             # main.py reads through a callback — count what arrives.
             frames = [0]
