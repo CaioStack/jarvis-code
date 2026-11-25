@@ -194,11 +194,11 @@ class WhisperSTT:
         if code == self.detected_language:
             return
         if confidence >= self._LANG_MIN_CONFIDENCE and len(text) >= self._LANG_MIN_CHARS:
-            print(f"[STT] language {self.detected_language} -> {code} "
+            print(f"[SYS] [STT] language {self.detected_language} -> {code} "
                   f"({confidence:.0%}, {len(text)} chars)")
             self.detected_language = code
             return
-        print(f"[STT] ignoring language guess {code} ({confidence:.0%}, "
+        print(f"[SYS] [STT] ignoring language guess {code} ({confidence:.0%}, "
               f"{len(text)} chars) - keeping {self.detected_language}")
 
     # ── hosted ───────────────────────────────────────────────────────────────
