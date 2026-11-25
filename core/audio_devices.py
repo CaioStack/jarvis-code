@@ -166,7 +166,7 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
                 print(f"[SYS] [Audio] Probe de input falhou: API entregou {frames[0]} frames "
                       f"em {secs*1000:.0f} ms — ignorando")
     except Exception as e:
-        print(f"[Audio] {kind} transport probe failed: {e}")
+        print(f"[SYS] [Audio] Erro no probe de transporte ({kind}): {e}")
         ok = False
 
     _probe_results[api_key] = ok
