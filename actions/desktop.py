@@ -432,7 +432,7 @@ def desktop_control(
     task   = params.get("task", "").strip()
 
     if player:
-        print(f"[Desktop] {action}")             # terminal, not the HUD
+        print(f"[SYS] [DesktopControl] {action}")             # terminal, not the HUD
 
     try:
         if action == "wallpaper":
@@ -467,7 +467,7 @@ def desktop_control(
         return _unknown(action or params.get("task", ""))
 
     except Exception as e:
-        print(f"[Desktop] Error: {e}")
+        print(f"[SYS] [DesktopControl] Error: {e}")
         return f"Desktop control error: {e}"
 
 
