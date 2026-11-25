@@ -85,7 +85,7 @@ def _desktop_search(app_name: str) -> bool:
         pyautogui.press("enter")
         return True
     except Exception as exc:
-        print(f"[open_app] desktop search failed: {exc}")
+        print(f"[SYS] [OpenApp] desktop search failed: {exc}")
         return False
 
 
@@ -112,7 +112,7 @@ def _launch_windows(app_name: str) -> bool:
             )
             return True
         except Exception as exc:
-            print(f"[open_app] Popen failed for {resolved!r}: {exc}")
+            print(f"[SYS] [OpenApp] Popen failed for {resolved!r}: {exc}")
 
     # A scheme, not a path: "ms-settings:", "spotify:", "steam://run/...".
     # Checked before ":" appears anywhere else — a Windows path has one too,
@@ -123,7 +123,7 @@ def _launch_windows(app_name: str) -> bool:
             os.startfile(app_name)               # noqa: S606 — no shell involved
             return True
         except Exception as exc:
-            print(f"[open_app] startfile failed for {app_name!r}: {exc}")
+            print(f"[SYS] [OpenApp] startfile failed for {app_name!r}: {exc}")
 
     return _desktop_search(app_name)
 
@@ -279,7 +279,7 @@ def _launch_and_verify(player, spoken: str, launcher_name: str,
         _say(player, "Tell the user, in one short sentence in their own "
                      f"language: {trouble}")
     except Exception as exc:
-        print(f"[open_app] {type(exc).__name__}: {exc}")
+        print(f"[SYS] [OpenApp] {type(exc).__name__}: {exc}")
         _say(player, "Tell the user, in one short sentence in their own "
                      f"language: opening {spoken} failed - {exc}")
 
@@ -347,7 +347,7 @@ def open_app(parameters=None, response=None, player=None,
                     "open_app", app=spoken, matched=candidate.label,
                     already_running=True, focused=True, verified=True,
                 )
-        print(f"[open_app] {best.label} is running but no window could be "
+        print(f"[SYS] [OpenApp] {best.label} is running but no window could be "
               f"raised — launching it instead, which is what brings back an "
               f"app that is only in the tray.")
 
