@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Status: Em Desenvolvimento](https://img.shields.io/badge/Status-Em%20Desenvolvimento-brightgreen.svg)
-![Version](https://img.shields.io/badge/Version-1.1.24-informational.svg)
+![Version](https://img.shields.io/badge/Version-1.1.25-informational.svg)
 
 **Jarvis-Code** é um sistema de Inteligência Artificial modular, altamente customizável e expansível, desenvolvido totalmente em Python. Inspirado no icônico assistente virtual, este projeto foi desenhado para ser um núcleo de IA capaz de gerenciar memória, executar ações complexas, integrar-se com provedores externos de LLMs e oferecer uma interface de controle intuitiva.
 
