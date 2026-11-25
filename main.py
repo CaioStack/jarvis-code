@@ -1424,9 +1424,8 @@ class JarvisLive:
                 else:
                     result = f"Unknown tool: {name}"
 
-        except Exception as e:
+        except Exception as e: print(f"[JARVIS] ❌ Tool '{name}' failed: {e}\n{traceback.format_exc()}")
             result = f"Tool '{name}' failed: {e}"
-            traceback.print_exc()
             self.speak_error(name, e)
 
         if not self.ui.muted:
