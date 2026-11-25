@@ -294,7 +294,7 @@ def _chain_pids() -> set[int]:
             except Exception:
                 break
     except Exception as exc:
-        print(f"[appidentity] could not map own process tree: {exc}")
+        print(f"[SYS] [AppIdentity] could not map own process tree: {exc}")
     return pids
 
 
@@ -358,7 +358,7 @@ def own_pids() -> set[int]:
                 except Exception:
                     continue
         except Exception as exc:
-            print(f"[appidentity] sibling scan failed: {exc}")
+            print(f"[SYS] [AppIdentity] sibling scan failed: {exc}")
 
     return pids
 
@@ -403,7 +403,7 @@ def _windows_by_pid() -> dict[int, list[str]]:
         user32.EnumWindows(WNDENUMPROC(_collect), 0)
         return titles
     except Exception as exc:
-        print(f"[appidentity] window enumeration unavailable: {exc}")
+        print(f"[SYS] [AppIdentity] window enumeration unavailable: {exc}")
         return {}
 
 
@@ -515,7 +515,7 @@ def running(spoken: str, include_self: bool = False) -> list[Match]:
     try:
         procs = list(psutil.process_iter(["pid", "name", "exe"]))
     except Exception as exc:
-        print(f"[appidentity] process list unavailable: {exc}")
+        print(f"[SYS] [AppIdentity] process list unavailable: {exc}")
         return []
 
     for proc in procs:
@@ -649,7 +649,7 @@ def _post_close_windows(pid: int) -> int:
         user32.EnumWindows(WNDENUMPROC(_maybe_close), 0)
         return asked
     except Exception as exc:
-        print(f"[appidentity] WM_CLOSE failed for pid {pid}: {exc}")
+        print(f"[SYS] [AppIdentity] WM_CLOSE failed for pid {pid}: {exc}")
         return 0
 
 
@@ -764,7 +764,7 @@ def _hwnds_for(pid: int) -> list[int]:
         user32.EnumWindows(WNDENUMPROC(_collect), 0)
         return found
     except Exception as exc:
-        print(f"[appidentity] window handles unavailable: {exc}")
+        print(f"[SYS] [AppIdentity] window handles unavailable: {exc}")
         return []
 
 
@@ -839,7 +839,7 @@ def focus(match: "Match") -> bool:
                     return True
             return False
         except Exception as exc:
-            print(f"[appidentity] focus failed: {exc}")
+            print(f"[SYS] [AppIdentity] focus failed: {exc}")
             return False
 
     if _OS == "Darwin":
