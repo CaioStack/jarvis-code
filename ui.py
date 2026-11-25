@@ -82,7 +82,7 @@ def _read_full_config() -> dict:
 
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
-APP_VERSION  = "MARK LVI"
+APP_VERSION  = "MARK LVI 1.1.0"
 APP_PROTOCOL = APP_VERSION.split()[-1]
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
@@ -688,7 +688,9 @@ class HudCanvas(QWidget):
             return qcol(C.MUTED_C), qcol(C.MUTED_C)
         if self.speaking:
             return qcol(C.PRI), qcol(C.ACC)
-        if self.state in ("THINKING", "PROCESSING"):
+        if self.state == "THINKING":
+            return qcol(C.PRI), qcol(C.ACC)
+        if self.state == "PROCESSING":
             return qcol(C.PRI), qcol(C.ACC2)
         if self.state == "LISTENING":
             return qcol(C.PRI), qcol(C.GREEN)
