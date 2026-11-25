@@ -413,8 +413,8 @@ def resolve(name: str, kind: str):
             if partial is not None:
                 return partial
 
-        print(f"[Audio] Saved {kind} device '{wanted}' cannot be opened at "
-              f"{_RATES.get(kind)} Hz on any host API — using system default")
+        print(f"[SYS] [Audio] Dispositivo {kind} salvo '{wanted}' não abre a "
+              f"{_RATES.get(kind)} Hz — usando padrão do sistema")
         return None
     except Exception as e:
         print(f"[Audio] resolve({kind}) failed: {e} — using system default")
