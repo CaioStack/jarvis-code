@@ -115,7 +115,7 @@ def _open_app(app_name: str) -> bool:
             return launched
 
     except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open {app_name}: {e}")
+        print(f"[SYS] [SendMessage] ⚠️ Could not open {app_name}: {e}")
         return False
 
 
@@ -123,10 +123,10 @@ def _open_browser_url(url: str) -> bool:
     import webbrowser
     try:
         webbrowser.open(url)
-        time.sleep(4.0) 
+        time.sleep(4.0)
         return True
     except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open browser: {e}")
+        print(f"[SYS] [SendMessage] ⚠️ Could not open browser: {e}")
         return False
 
 def _search_in_app(query: str) -> None:
@@ -202,17 +202,17 @@ def _send_whatsapp(receiver: str, message: str) -> str:
     try:
         from plugins import _whatsapp_core as wa
     except Exception as e:
-        print(f"[SendMessage] WhatsApp driver unavailable ({e}) — typing blind.")
+        print(f"[SYS] [SendMessage] WhatsApp driver unavailable ({e}) — typing blind.")
         return _desktop_send("WhatsApp", receiver, message)
 
     try:
         transport, why = wa.get()
     except Exception as e:
-        print(f"[SendMessage] WhatsApp driver failed to start ({e}) — typing blind.")
+        print(f"[SYS] [SendMessage] WhatsApp driver failed to start ({e}) — typing blind.")
         return _desktop_send("WhatsApp", receiver, message)
 
     if transport is None:
-        print(f"[SendMessage] {why} — typing blind.")
+        print(f"[SYS] [SendMessage] {why} — typing blind.")
         return _desktop_send("WhatsApp", receiver, message)
 
     sent, failure = transport.send_message_to(receiver, message)
@@ -340,7 +340,7 @@ def send_message(
         )
 
     preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
-    print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
+    print(f"[SYS] [SendMessage] 📨 {platform} → {receiver}: {preview}")
     if player:
         player.write_log(f"[msg] {platform} → {receiver}")   # the message itself IS the news
 
@@ -369,7 +369,7 @@ def _send_and_report(player, platform: str, receiver: str,
     try:
         result = _resolve_platform(platform)(receiver, message_text)
     except Exception as exc:
-        print(f"[SendMessage] {type(exc).__name__}: {exc}")
+        print(f"[SYS] [SendMessage] {type(exc).__name__}: {exc}")
         result = outcome.failed("send_message", f"it failed: {exc}",
                                 to=receiver, platform=platform)
 
@@ -384,7 +384,7 @@ def _send_and_report(player, platform: str, receiver: str,
     # conversation and for things that went wrong — a line reading
     # `status=done action=send_message verified=true` there is machinery
     # showing through, and it was reported as exactly that.
-    print(f"[SendMessage] {'✅' if verified else '⚠️'} {result[:160]}")
+    print(f"[SYS] [SendMessage] {'✅' if verified else '⚠️'} {result[:160]}")
     if player and outcome.is_problem(result):
         player.write_log(f"[msg] could not confirm the message to {receiver} — "
                          f"see the terminal")
