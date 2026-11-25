@@ -417,7 +417,7 @@ def resolve(name: str, kind: str):
               f"{_RATES.get(kind)} Hz — usando padrão do sistema")
         return None
     except Exception as e:
-        print(f"[Audio] resolve({kind}) failed: {e} — using system default")
+        print(f"[SYS] [Audio] Erro ao resolver {kind}: {e} — usando padrão do sistema")
         return None
 
 
