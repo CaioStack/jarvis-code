@@ -677,8 +677,8 @@ def set_output_volume(percent: int, name: str = "") -> bool:
         except Exception as e:
             print(f"[SYS] [Audio] Não foi possível definir o volume de '{name}': {e}")
     if name:
-        print(f"[Audio] '{name}' has no separate volume control here — "
-              f"setting the system level instead.")
+        print(f"[SYS] [Audio] '{name}' sem controle de volume próprio — "
+              f"ajustando nível do sistema")
     try:
         from actions.computer_settings import volume_set, volume_get
         volume_set(percent)
