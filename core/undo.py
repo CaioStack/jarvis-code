@@ -73,7 +73,7 @@ def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
             while len(_stack) > MAX_DEPTH:
                 _stack.pop(0)
     except Exception as e:                                  # pragma: no cover
-        print(f"[Undo] push failed: {e}")
+        print(f"[SYS] [Undo] push failed: {e}")
 
 
 def can_undo() -> bool:
