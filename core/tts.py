@@ -166,7 +166,7 @@ def _import_kokoro_pipeline():
             ) from first_err
 
         # ── Version mismatch: upgrade kokoro silently and retry ──────────
-        print("[TTS] Kokoro/transformers version mismatch detected — upgrading kokoro…")
+        print("[SYS] [TTS] Kokoro/transformers version mismatch detected — upgrading kokoro…")
         import subprocess
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "kokoro>=0.9",
@@ -185,7 +185,7 @@ def _import_kokoro_pipeline():
         for key in stale:
             del sys.modules[key]
 
-        print("[TTS] Kokoro upgraded — retrying import…")
+        print("[SYS] [TTS] Kokoro upgraded — retrying import…")
         try:
             return _try_import()
         except Exception as retry_err:
@@ -260,7 +260,7 @@ class KokoroTTSEngine:
         except Exception:
             device = "cpu"
 
-        print(f"[TTS] Kokoro — loading (lang='{lang}', device='{device}')…")
+        print(f"[SYS] [TTS] Kokoro — loading (lang='{lang}', device='{device}')…")
 
         KPipeline = _import_kokoro_pipeline()
 
@@ -281,7 +281,7 @@ class KokoroTTSEngine:
                 "does not exist", "outgoing", "local_files_only",
             )
             if any(k in _e for k in _offline_keywords):
-                print("[TTS] Kokoro model not in local cache — downloading (one-time, internet required)…")
+                print("[SYS] [TTS] Kokoro model not in local cache — downloading (one-time, internet required)…")
                 os.environ.pop("HF_HUB_OFFLINE",      None)
                 os.environ.pop("TRANSFORMERS_OFFLINE", None)
                 os.environ.pop("HF_DATASETS_OFFLINE",  None)
@@ -298,14 +298,14 @@ class KokoroTTSEngine:
             else:
                 raise
 
-        print("[TTS] Kokoro compiling (first-time only)…")
+        print("[SYS] [TTS] Kokoro compiling (first-time only)…")
         # Warmup: compiles PyTorch JIT graph so first real speak() call is instant.
         try:
             for _ in self._pipeline("hello", voice=self.voice, speed=self.speed):
                 pass
-            print("[TTS] Kokoro ready.")
+            print("[SYS] [TTS] Kokoro ready.")
         except Exception as e:
-            print(f"[TTS] Kokoro warmup warning: {e}")
+            print(f"[SYS] [TTS] Kokoro warmup warning: {e}")
 
     def speak(self, text: str) -> None:
         with self._lock:
@@ -409,7 +409,7 @@ class TTSPlayer:
                 on_start()
             self._engine.speak(text)
         except Exception as e:
-            print(f"[TTS] Error: {e}")
+            print(f"[SYS] [TTS] Error: {e}")
         finally:
             with self._lock:
                 self._playing = False
