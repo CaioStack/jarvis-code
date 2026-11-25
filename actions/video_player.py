@@ -157,7 +157,7 @@ def _resolve_youtube(url_or_query: str) -> tuple[str, str, str, str]:
     if not video:
         return "", "", "", "no playable stream was offered for that video."
     if audio and audio.get("language"):
-        print(f"[Video] audio track: {audio.get('language')} "
+        print(f"[SYS] [Video] audio track: {audio.get('language')} "
               f"({audio.get('format_note') or audio.get('format_id')})")
     return video["url"], (audio or {}).get("url", ""), info.get("title") or "", ""
 
