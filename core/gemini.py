@@ -301,12 +301,12 @@ def note_live_failure(model: str, err: str) -> bool:
     """
     if is_quota_error(err):
         _cool(model, _COOLDOWN_SECONDS)
-        print(f"[Gemini] Live model {model} is out of quota — "
+        print(f"[SYS] [Gemini] Live model {model} is out of quota — "
               f"switching for {_COOLDOWN_SECONDS // 60} minutes.")
         return True
     if is_gone_error(err):
         _cool(model, _GONE_SECONDS)
-        print(f"[Gemini] Live model {model} is unavailable to this key — "
+        print(f"[SYS] [Gemini] Live model {model} is unavailable to this key — "
               f"setting it aside.")
         return True
     return False
@@ -684,7 +684,7 @@ def call(contents, tier: str = FAST, config=None,
         # meant every one-shot call in the app failed — which is exactly the
         # situation somebody configuring another provider is trying to leave.
         if not rungs:
-            print("[Gemini] no Gemini API key is configured")
+            print("[SYS] [Gemini] no Gemini API key is configured")
             return None
         ladder = rungs
 
@@ -697,7 +697,7 @@ def call(contents, tier: str = FAST, config=None,
         ladder = tuple(m for m in ladder
                        if m != LIVE and not m.startswith(PROVIDER_PREFIX))
         if not ladder:
-            print("[Gemini] nothing on this ladder can read a recording")
+            print("[SYS] [Gemini] nothing on this ladder can read a recording")
             return None
 
     cl = None
@@ -721,17 +721,17 @@ def call(contents, tier: str = FAST, config=None,
             msg = str(e)
             if is_quota_error(msg):
                 _cool(model)
-                print(f"[Gemini] {model}: out of quota — skipping it for "
+                print(f"[SYS] [Gemini] {model}: out of quota — skipping it for "
                       f"{_COOLDOWN_SECONDS // 60} minutes")
             elif is_gone_error(msg):
                 _cool(model, _GONE_SECONDS)
-                print(f"[Gemini] {model}: unavailable to this key — set aside")
+                print(f"[SYS] [Gemini] {model}: unavailable to this key — set aside")
             elif is_unavailable_error(msg):
                 _cool(model, _UNAVAILABLE_SECONDS)
-                print(f"[Gemini] {model}: not answering — resting it for "
+                print(f"[SYS] [Gemini] {model}: not answering — resting it for "
                       f"{_UNAVAILABLE_SECONDS // 60} minutes")
             else:
-                print(f"[Gemini] {model}: {type(e).__name__}: {msg[:140]}")
+                print(f"[SYS] [Gemini] {model}: {type(e).__name__}: {msg[:140]}")
     return None
 
 
@@ -759,5 +759,5 @@ def as_json(contents, tier: str = FAST, config=None,
     try:
         return json.loads(raw)
     except Exception as e:
-        print(f"[Gemini] reply was not JSON: {e}")
+        print(f"[SYS] [Gemini] reply was not JSON: {e}")
         return default
