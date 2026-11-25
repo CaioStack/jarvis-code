@@ -1007,11 +1007,11 @@ def _console(text: str) -> None:
     exception's own text can contain any character at all.
     """
     try:
-        print(text)
+        print(f"[SYS] [Engine] {text}")
     except Exception:
         try:
             enc = getattr(sys.stdout, "encoding", None) or "ascii"
-            print(text.encode(enc, "replace").decode(enc, "replace"))
+            print(f"[SYS] [Engine] {text}".encode(enc, "replace").decode(enc, "replace"))
         except Exception:
             pass                # a message is never worth an exception
 
