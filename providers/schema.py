@@ -422,9 +422,9 @@ if __name__ == "__main__":
         reg = discover_actions(root / "actions", logger=lambda m: None)
         decls.extend(reg.get_tool_declarations())
     except Exception as e:
-        print(f"(actions not loaded: {type(e).__name__}: {e})")
+        print(f"[SYS] [Schema] (actions not loaded: {type(e).__name__}: {e})")
 
-    print(f"\n{len(decls)} declarations, {payload_size(decls):,} characters\n")
+    print(f"[SYS] [Schema] {len(decls)} declarations, {payload_size(decls):,} characters")
 
     openai = to_openai(decls)
     anthropic = to_anthropic(decls)
@@ -434,25 +434,25 @@ if __name__ == "__main__":
     blob = json.dumps(openai) + json.dumps(anthropic)
     import re
     bad = sorted(set(re.findall(r'"type":\s*"([A-Z_]+)"', blob)))
-    print(f"OpenAI     {len(openai)} tools, {len(json.dumps(openai)):,} chars")
-    print(f"Anthropic  {len(anthropic)} tools, {len(json.dumps(anthropic)):,} chars")
-    print(f"upper-case types left behind: {bad or 'none'}")
+    print(f"[SYS] [Schema] OpenAI     {len(openai)} tools, {len(json.dumps(openai)):,} chars")
+    print(f"[SYS] [Schema] Anthropic  {len(anthropic)} tools, {len(json.dumps(anthropic)):,} chars")
+    print(f"[SYS] [Schema] upper-case types left behind: {bad or 'none'}")
 
     names = [d.get('name') for d in decls if isinstance(d, dict)]
-    print(f"\nnames preserved: {names == [t['function']['name'] for t in openai]}")
+    print(f"[SYS] [Schema] names preserved: {names == [t['function']['name'] for t in openai]}")
 
     for cap in (None, 12, 8):
         kept = budget(decls, cap)
         core = [d.get('name') for d in kept if _tier_of(d, CORE_TOOLS) == 0]
-        print(f"\nmax_tools={str(cap):<5} -> {len(kept):>2} tools, "
+        print(f"[SYS] [Schema] max_tools={str(cap):<5} -> {len(kept):>2} tools, "
               f"{payload_size(kept):>6,} chars   core kept: {len(core)}")
         if cap:
-            print(f"   {', '.join(d.get('name', '?') for d in kept)}")
+            print(f"[SYS] [Schema]    {', '.join(d.get('name', '?') for d in kept)}")
 
-    print("\n--- one converted declaration, in full ---")
+    print("[SYS] [Schema] --- one converted declaration, in full ---")
     sample = next((t for t in openai
                    if t["function"]["name"] == "screen_process"), openai[0])
-    print(json.dumps(sample, indent=2)[:1200])
+    print(f"[SYS] [Schema] {json.dumps(sample, indent=2)[:1200]}")
 
-    print("\n--- prompt-mode fallback, first 6 lines ---")
-    print("\n".join(to_prompt(budget(decls, 12)).splitlines()[:10]))
+    print("[SYS] [Schema] --- prompt-mode fallback, first 6 lines ---")
+    print(f"[SYS] [Schema] {''.join(to_prompt(budget(decls, 12)).splitlines()[:10])}")
