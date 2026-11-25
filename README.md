@@ -1,7 +1,7 @@
 # JARVIS AI Assistant
 
-**Version:** 1.1.1
-**Status:** Fase 1: Core Stability & UX Refinement (Progresso: Logging padronizado, Estados HUD diferenciados, Padronização de Logs em core/audio_devices.py)
+**Version:** 1.1.2
+**Status:** Fase 1: Core Stability & UX Refinement (Progresso: Logging padronizado, Estados HUD diferenciados, Padronização de Logs em core/audio_devices.py - probe output)
 
 ## 🚀 Próximos Passos (Fase 1)
 *   Implementar a próxima tarefa mínima (ex: Padronização de Logging em outros módulos).
