@@ -676,7 +676,7 @@ def set_output_volume(percent: int, name: str = "") -> bool:
             endpoint.SetMasterVolumeLevelScalar(percent / 100.0, None)
             return True
         except Exception as e:
-            print(f"[Audio] could not set '{name}' volume: {e}")
+            print(f"[SYS] [Audio] Não foi possível definir o volume de '{name}': {e}")
     if name:
         print(f"[Audio] '{name}' has no separate volume control here — "
               f"setting the system level instead.")
