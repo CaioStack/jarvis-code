@@ -657,7 +657,7 @@ def get_output_volume(name: str = "") -> Optional[int]:
         from actions.computer_settings import volume_get
         return volume_get()
     except Exception as e:
-        print(f"[Audio] could not read the output volume: {e}")
+        print(f"[SYS] [Audio] Não foi possível ler volume de saída: {e}")
         return None
 
 
