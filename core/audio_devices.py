@@ -315,7 +315,7 @@ def _query() -> dict[str, list[str]]:
         return out
 
     except Exception as e:
-        print(f"[Audio] Device enumeration failed: {e}")
+        print(f"[SYS] [Audio] Falha na enumeração de dispositivos: {e}")
     return out
 
 
