@@ -652,7 +652,7 @@ def get_output_volume(name: str = "") -> Optional[int]:
             return max(0, min(100, round(
                 endpoint.GetMasterVolumeLevelScalar() * 100)))
         except Exception as e:
-            print(f"[Audio] could not read '{name}' volume: {e}")
+            print(f"[SYS] [Audio] Não foi possível ler volume de '{name}': {e}")
     try:
         from actions.computer_settings import volume_get
         return volume_get()
