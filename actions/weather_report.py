@@ -43,7 +43,7 @@ def weather_action(
 
 
 def _log(message: str, player=None) -> None:
-    print(f"[Weather] {message}")
+    print(f"[SYS] [Weather] {message}")
     if player:
         try:
             player.write_log(f"JARVIS: {message}")
