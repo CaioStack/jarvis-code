@@ -48,15 +48,15 @@ def check(name: str, cond, detail: str = "") -> None:
     global _ok, _fail
     if cond:
         _ok += 1
-        print(f"  PASS  {name}")
+        print(f"[SYS] [Tests]   PASS  {name}")
     else:
         _fail += 1
         _failures.append(name)
-        print(f"  FAIL  {name}   {detail}")
+        print(f"[SYS] [Tests]   FAIL  {name}   {detail}")
 
 
 def section(title: str) -> None:
-    print(f"\n{title}")
+    print(f"[SYS] [Tests] {title}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1069,7 +1069,7 @@ def test_panel_settings_survive():
 
 # ─────────────────────────────────────────────────────────────────────────────
 async def main() -> int:
-    print("providers self-test")
+    print("[SYS] [Tests] providers self-test")
     await test_real_caller_shapes()
     await test_taskgroup_and_tool_loop()
     await test_full_stack_over_http()
@@ -1090,12 +1090,12 @@ async def main() -> int:
     test_a_chosen_voice_downloads_itself()
     test_panel_settings_survive()
 
-    print(f"\n{'=' * 56}")
-    print(f"{_ok} passed, {_fail} failed")
+    print(f"[SYS] [Tests] {'=' * 56}")
+    print(f"[SYS] [Tests] {_ok} passed, {_fail} failed")
     if _failures:
         for name in _failures:
-            print(f"   - {name}")
-    print("=" * 56)
+            print(f"[SYS] [Tests]    - {name}")
+    print(f"[SYS] [Tests] {'=' * 56}")
     return 1 if _fail else 0
 
 
