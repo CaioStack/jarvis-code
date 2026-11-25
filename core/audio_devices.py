@@ -163,8 +163,8 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
             st.stop(); st.close()
             ok = frames[0] > rate * secs * 0.3
             if not ok:
-                print(f"[Audio] input: host API delivered {frames[0]} frames in "
-                      f"{secs*1000:.0f} ms — skipping it")
+                print(f"[SYS] [Audio] Probe de input falhou: API entregou {frames[0]} frames "
+                      f"em {secs*1000:.0f} ms — ignorando")
     except Exception as e:
         print(f"[Audio] {kind} transport probe failed: {e}")
         ok = False
