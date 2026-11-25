@@ -309,9 +309,9 @@ def _query() -> dict[str, list[str]]:
                 out[kind] = [_display_name(n, devices) for _i, n in found]
                 break
             if out[kind]:
-                print(f"[Audio] {kind}: using "
-                      f"{_chosen_api[kind] or 'any host API'} "
-                      f"({len(out[kind])} devices)")
+                print(f"[SYS] [Audio] {kind}: usando "
+                      f"{_chosen_api[kind] or 'qualquer host API'} "
+                      f"({len(out[kind])} dispositivos)")
         return out
 
     except Exception as e:
