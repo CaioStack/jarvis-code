@@ -85,7 +85,7 @@ def _restore_from_trash(original: Path) -> str:
                         item.InvokeVerb("UNDELETE")
                         return f"'{original.name}' restored from the Recycle Bin."
         except Exception as e:
-            print(f"[file] Recycle Bin restore failed: {e}")
+            print(f"[SYS] [FileController] Recycle Bin restore failed: {e}")
     return (f"'{original.name}' is in the Recycle Bin — I could not pull it back "
             f"automatically, but it is there and can be restored by hand.")
 
@@ -595,7 +595,7 @@ def organize_desktop() -> str:
                             shutil.move(str(moved_to), str(origin))
                             restored += 1
                     except Exception as e:
-                        print(f"[file] undo organize: {moved_to.name}: {e}")
+                        print(f"[SYS] [FileController] undo organize: {moved_to.name}: {e}")
                 # Clear away the folders we created, but only while they are
                 # empty — anything the user put in since stays.
                 for folder in {m.parent for _o, m in entries}:
@@ -657,7 +657,7 @@ def file_controller(
     name   = params.get("name", "")
 
     if player:
-        print(f"[File] {action} {name or path}")  # terminal, not the HUD
+        print(f"[SYS] [FileController] {action} {name or path}")  # terminal, not the HUD
 
     try:
         if action == "list":
