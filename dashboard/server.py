@@ -194,7 +194,7 @@ def blocking_firewall_rules() -> list:
                         and (name, program) not in found):
                     found.append((name, program))
     except Exception as exc:
-        print(f"[Dashboard] could not read the firewall rules: {exc}")
+        print(f"[SYS] [Dashboard] could not read the firewall rules: {exc}")
     _BLOCK_CACHE = found
     return found
 
@@ -271,7 +271,7 @@ def _ensure_network_access(*ports: int) -> None:
         need_private = _network_is_public()
 
         if blocked:
-            print(f"[Dashboard] Windows is BLOCKING inbound connections to "
+            print(f"[SYS] [Dashboard] Windows is BLOCKING inbound connections to "
                   f"{', '.join(sorted(set(os.path.basename(e) for e in py_exes)))} "
                   f"({len(blocked)} block rule(s)). Your phone cannot reach the "
                   f"dashboard until those are removed — asking for permission "
@@ -321,7 +321,7 @@ def _ensure_network_access(*ports: int) -> None:
         # Say what will be attempted, so a UAC prompt nobody expected has a
         # reason attached to it in the terminal.
         if blocked:
-            print("[Dashboard] The Windows prompt about to appear is JARVIS "
+            print("[SYS] [Dashboard] The Windows prompt about to appear is JARVIS "
                   "removing those block rules. Declining it leaves the phone "
                   "dashboard unreachable, and nothing else is affected.")
 
@@ -343,7 +343,7 @@ def _ensure_network_access(*ports: int) -> None:
                 [bat_path], capture_output=True, timeout=8, shell=True
             )
             if r.returncode == 0:
-                print(f"[Dashboard] Firewall configured for {', '.join(str(pt) for pt in ports)}.")
+                print(f"[SYS] [Dashboard] Firewall configured for {', '.join(str(pt) for pt in ports)}.")
                 try:
                     os.unlink(bat_path)
                 except Exception:
@@ -355,8 +355,8 @@ def _ensure_network_access(*ports: int) -> None:
         # ── ShellExecuteW: native UAC elevation (most reliable on Windows) ────
         # ShellExecuteW with verb "runas" always shows the UAC dialog regardless
         # of UAC level settings. Non-blocking — uvicorn is already running.
-        print("[Dashboard] One-time network setup required.")
-        print("[Dashboard] >>> A Windows security dialog will appear — click 'Yes' <<<")
+        print("[SYS] [Dashboard] One-time network setup required.")
+        print("[SYS] [Dashboard] >>> A Windows security dialog will appear — click 'Yes' <<<")
         try:
             ret = ctypes.windll.shell32.ShellExecuteW(
                 None,       # hwnd  (no parent window)
@@ -376,30 +376,30 @@ def _ensure_network_access(*ports: int) -> None:
                 # nobody looked at.
                 still = blocking_firewall_rules()
                 if still:
-                    print("[Dashboard] ⚠️  Windows is STILL blocking inbound "
+                    print("[SYS] [Dashboard] ⚠️  Windows is STILL blocking inbound "
                           "connections to this interpreter.")
-                    print("[Dashboard] ⚠️  Remove these by hand in Windows "
+                    print("[SYS] [Dashboard] ⚠️  Remove these by hand in Windows "
                           "Defender Firewall > Inbound Rules: "
                           + ", ".join(sorted({n for n, _ in still})))
                 else:
-                    print(f"[Dashboard] Network setup complete — "
+                    print(f"[SYS] [Dashboard] Network setup complete — "
                           f"{', '.join(str(pt) for pt in ports)} open.")
-                    print("[Dashboard] Refresh your phone browser to connect.")
+                    print("[SYS] [Dashboard] Refresh your phone browser to connect.")
             else:
-                print("[Dashboard] Setup was not allowed.")
+                print("[SYS] [Dashboard] Setup was not allowed.")
                 if blocked:
-                    print("[Dashboard] Your phone CANNOT reach the dashboard "
+                    print("[SYS] [Dashboard] Your phone CANNOT reach the dashboard "
                           "until this is done: Windows has block rules for "
                           + ", ".join(sorted({n for n, _ in blocked}))
                           + " which override every allow rule.")
-                    print("[Dashboard] Either restart JARVIS and accept the "
+                    print("[SYS] [Dashboard] Either restart JARVIS and accept the "
                           "prompt, or delete those rules in Windows Defender "
                           "Firewall > Inbound Rules.")
                 else:
-                    print("[Dashboard] Phone connections may fail until JARVIS "
+                    print("[SYS] [Dashboard] Phone connections may fail until JARVIS "
                           "is run as Administrator.")
         except Exception as e:
-            print(f"[Dashboard] Firewall setup error: {e}")
+            print(f"[SYS] [Dashboard] Firewall setup error: {e}")
         finally:
             # Cleanup after the bat has had time to run
             def _cleanup(path: str) -> None:
@@ -428,7 +428,7 @@ def _ensure_network_access(*ports: int) -> None:
             if py in listed.stdout:
                 return  # already allowed
 
-            print("[Dashboard] One-time network setup — enter your password in the macOS dialog.")
+            print("[SYS] [Dashboard] One-time network setup — enter your password in the macOS dialog.")
             subprocess.run(
                 ["osascript", "-e",
                  f'do shell script "{fw_ctl} --add {py} && {fw_ctl} --unblockapp {py}"'
@@ -454,9 +454,9 @@ def _ensure_network_access(*ports: int) -> None:
         r = subprocess.run(["ufw", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if "active" in r.stdout.lower():
             if _privileged(["ufw", "allow", f"{port}/tcp"]):
-                print(f"[Dashboard] ufw: port {port} allowed.")
+                print(f"[SYS] [Dashboard] ufw: port {port} allowed.")
             else:
-                print(f"[Dashboard] Run manually:  sudo ufw allow {port}/tcp")
+                print(f"[SYS] [Dashboard] Run manually:  sudo ufw allow {port}/tcp")
             return
     except FileNotFoundError:
         pass
@@ -469,9 +469,9 @@ def _ensure_network_access(*ports: int) -> None:
             ok = (_privileged(["firewall-cmd", "--add-port", f"{port}/tcp", "--permanent"])
                   and _privileged(["firewall-cmd", "--reload"]))
             if ok:
-                print(f"[Dashboard] firewalld: port {port} allowed.")
+                print(f"[SYS] [Dashboard] firewalld: port {port} allowed.")
             else:
-                print(f"[Dashboard] Run manually:  sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload")
+                print(f"[SYS] [Dashboard] Run manually:  sudo firewall-cmd --add-port={port}/tcp --permanent && sudo firewall-cmd --reload")
             return
     except FileNotFoundError:
         pass
@@ -480,9 +480,9 @@ def _ensure_network_access(*ports: int) -> None:
         r = subprocess.run(["iptables", "-L", "INPUT", "-n"], capture_output=True, timeout=5)
         if r.returncode == 0:
             if _privileged(["iptables", "-A", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"]):
-                print(f"[Dashboard] iptables: port {port} opened.")
+                print(f"[SYS] [Dashboard] iptables: port {port} opened.")
             else:
-                print(f"[Dashboard] Run manually:  sudo iptables -A INPUT -p tcp --dport {port} -j ACCEPT")
+                print(f"[SYS] [Dashboard] Run manually:  sudo iptables -A INPUT -p tcp --dport {port} -j ACCEPT")
     except FileNotFoundError:
         pass  # no iptables means firewall is probably off — nothing to do
 
@@ -553,8 +553,8 @@ def _ensure_certs() -> bool:
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.x509.oid import NameOID
     except ImportError:
-        print("[Dashboard] cryptography not installed — serving over plain HTTP.")
-        print("[Dashboard] For HTTPS run:  pip install cryptography")
+        print("[SYS] [Dashboard] cryptography not installed — serving over plain HTTP.")
+        print("[SYS] [Dashboard] For HTTPS run:  pip install cryptography")
         return False
 
     try:
@@ -606,10 +606,10 @@ def _ensure_certs() -> bool:
         except Exception:
             pass
 
-        print(f"[Dashboard] Generated a self-signed certificate for this machine: {certs}")
+        print(f"[SYS] [Dashboard] Generated a self-signed certificate for this machine: {certs}")
         return True
     except Exception as e:
-        print(f"[Dashboard] Certificate generation failed ({e}) — serving over plain HTTP.")
+        print(f"[SYS] [Dashboard] Certificate generation failed ({e}) — serving over plain HTTP.")
         return False
 
 
@@ -1169,14 +1169,14 @@ class DashboardServer:
 
         cfg = uvicorn.Config(bounce, host="0.0.0.0", port=PORT,
                              log_level="warning")
-        print(f"[Dashboard] Type by hand:  {self._ip}:{PORT}  "
+        print(f"[SYS] [Dashboard] Type by hand:  {self._ip}:{PORT}  "
               f"(sends you to the secure page)")
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
         if not _DEPS_OK:
-            print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
-            print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
+            print("[SYS] [Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
+            print("[SYS] [Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")
             return
 
         # Firewall setup runs in a thread — uvicorn starts immediately,
@@ -1216,7 +1216,7 @@ class DashboardServer:
         if use_ssl:
             asyncio.create_task(self._serve_redirector())
         else:
-            print("[Dashboard] Plain HTTP on your local network. Commands are "
+            print("[SYS] [Dashboard] Plain HTTP on your local network. Commands are "
                   "not encrypted; the pairing key still gates access.")
             print('[Dashboard] For HTTPS set "dashboard_https": true in '
                   'config/api_keys.json (your phone will ask you to trust the '
@@ -1253,10 +1253,10 @@ class DashboardServer:
                 f"another copy of JARVIS is probably running. Close it and "
                 f"restart, or the phone dashboard will stay unreachable "
                 f"({exc.__class__.__name__})")
-            print(f"[Dashboard] {self._bind_error}")
+            print(f"[SYS] [Dashboard] {self._bind_error}")
             return
         _probe.close()
 
-        print(f"[Dashboard] {self.get_url()}")
-        print("[Dashboard] Press 'Remote Control' in JARVIS UI to get the QR code.")
+        print(f"[SYS] [Dashboard] {self.get_url()}")
+        print("[SYS] [Dashboard] Press 'Remote Control' in JARVIS UI to get the QR code.")
         await uvicorn.Server(cfg).serve()
