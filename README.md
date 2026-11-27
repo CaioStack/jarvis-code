@@ -332,6 +332,260 @@ registry.list_plugin_snapshots("meu_plugin")
 registry.rollback_plugin("meu_plugin", -1)  # -1 = mais recente
 ```
 
+#### Níveis de Confiança (Trust Levels)
+Configure níveis de confiança para plugins:
+```python
+# Trust levels: official, community, untrusted, blocked
+registry.set_plugin_trust_level("meu_plugin", "community")
+
+# Ver nível de confiança
+registry.get_plugin_trust_level("meu_plugin")
+
+# Info detalhada
+registry.get_trust_level_info("meu_plugin")
+```
+
+#### Assinatura Criptográfica Avançada
+```python
+# Ed25519 (recomendado para produção)
+registry.sign_plugin_ed25519("meu_plugin", private_key_bytes, "Developer")
+registry.verify_plugin_ed25519("meu_plugin", public_key_bytes)
+
+# RSA PKCS#1 v1.5
+registry.sign_plugin_rsa("meu_plugin", private_key_pem, "Developer")
+registry.verify_plugin_rsa("meu_plugin", public_key_pem)
+```
+
+#### Sandbox com cgroups (Linux)
+```python
+# Isolamento real de memória/CPU usando cgroups v2
+# Configurado automaticamente se disponível no sistema
+"sandboxed": true,
+"sandbox_memory_mb": 256,
+"cpu_quota_percent": 50.0,
+```
+
+#### Marketplace de Plugins
+```python
+# Buscar plugins online (GitHub)
+registry.search_plugins_online("weather")
+
+# Instalar plugin de URL
+registry.install_plugin_from_url("https://raw.githubusercontent.com/user/repo/main/plugin.py")
+```
+
+#### Resolução de Dependências
+```python
+# Resolver dependências transitivas
+registry.resolve_plugin_dependencies("meu_plugin")
+
+# Ver grafo completo de dependências
+registry.get_dependency_graph()
+
+# Detectar dependências circulares
+registry.check_circular_dependencies()
+```
+
+#### Orçamentos de Performance
+```python
+# Definir orçamento
+registry.set_performance_budget("meu_plugin", {
+    "max_avg_time_ms": 5000,
+    "max_memory_mb": 200,
+    "min_success_rate": 95.0,
+})
+
+# Verificar orçamento
+registry.check_performance_budget("meu_plugin")
+registry.check_all_performance_budgets()
+```
+
+#### Replay de Eventos / Debugging
+```python
+# Gravar eventos
+registry.record_plugin_event("meu_plugin", "run_start", {"parameters": {...}})
+
+# Ver log de eventos
+registry.get_plugin_event_log("meu_plugin", "run_error", limit=50)
+
+# Replay de execuções
+registry.replay_plugin_events("meu_plugin", player, session_memory)
+```
+
+#### Testes A/B
+```python
+# Criar teste A/B
+registry.create_ab_test("meu_plugin",
+    variant_a={"algorithm": "v1", "threshold": 0.5},
+    variant_b={"algorithm": "v2", "threshold": 0.7},
+    traffic_split=0.5
+)
+
+# Determinar variante para execução atual
+variant = registry.get_ab_test_variant("meu_plugin")
+
+# Registrar resultado
+registry.record_ab_test_result("meu_plugin", variant, success=True)
+
+# Ver resultados com significância estatística
+registry.get_ab_test_results("meu_plugin")
+```
+
+#### Webhooks
+```python
+# Registrar webhook
+registry.register_webhook("meu_plugin", "plugin_error",
+    "https://meuservidor.com/webhook", secret="chave-secreta")
+
+# Listar webhooks
+registry.get_webhooks("meu_plugin")
+
+# Remover webhook
+registry.unregister_webhook("meu_plugin", "https://meuservidor.com/webhook")
+```
+
+#### Streaming de Métricas em Tempo Real
+```python
+# Iniciar stream
+registry.start_metrics_stream("meu_plugin", interval=10.0)
+
+# Parar stream
+registry.stop_metrics_stream("meu_plugin")
+
+# Consumir via hook
+registry.register_hook("metrics_stream", callback_fn)
+```
+
+#### Validação de Configuração
+```python
+# Validar config contra schema PLUGIN_SETTINGS
+registry.validate_plugin_config("meu_plugin", config)
+
+# Obter config validada
+registry.get_validated_config("meu_plugin")
+```
+
+#### Listas de Controle de Acesso (ACLs)
+```python
+# Definir ACL
+registry.set_plugin_acl("meu_plugin", {
+    "allow_users": ["user1", "user2"],
+    "deny_users": ["blocked_user"],
+    "allow_roles": ["premium", "admin"],
+    "deny_roles": ["guest"],
+    "allow_ips": ["192.168.1.0/24"],
+    "time_restrictions": {
+        "allowed_hours": [9, 10, 11, 12, 13, 14, 15, 16, 17],
+        "allowed_days": [0, 1, 2, 3, 4],  # Mon-Fri
+    }
+})
+
+# Verificar acesso
+registry.check_plugin_acl("meu_plugin", user_id="user1", roles=["premium"], ip="192.168.1.100")
+```
+
+#### Análise de Uso
+```python
+# Analytics de um plugin (últimos 30 dias)
+registry.get_usage_analytics("meu_plugin", days=30)
+
+# Analytics de todos os plugins
+registry.get_all_usage_analytics(days=30)
+```
+
+#### Internacionalização (i18n)
+```python
+# Traduções no plugin (TRANSLATIONS dict)
+# Obter traduções para locale
+registry.get_plugin_translations("meu_plugin", "pt")
+
+# Definir locale preferido
+registry.set_plugin_locale("meu_plugin", "es")
+registry.get_plugin_locale("meu_plugin")
+```
+
+#### Rastreamento de Custos (API)
+```python
+# Registrar custo de chamada API
+registry.record_plugin_cost("meu_plugin", 0.0001, "USD", {"model": "gpt-4"})
+
+# Ver custos
+registry.get_plugin_costs("meu_plugin", days=30)
+registry.get_all_plugin_costs(days=30)
+```
+
+#### Health Checks com Alertas
+```python
+# Health check completo
+registry.run_health_check("meu_plugin")
+
+# Health checks de todos os plugins
+registry.run_all_health_checks()
+# Retorna: overall_status (healthy/degraded/critical), checks, alerts
+```
+
+#### Migração de Configuração
+```python
+# Migrar config entre versões
+registry.migrate_plugin_config("meu_plugin", "1.0.0", "2.0.0", {
+    "1.0.0": "migrate_v1_to_v2",
+    "2.0.0": "migrate_v2_to_v3",
+})
+
+# Plugin deve definir funções de migração:
+# def migrate_v1_to_v2(config): return new_config
+```
+
+#### Backup e Restore
+```python
+# Backup completo
+backup = registry.backup_plugin("meu_plugin", include_source=True)
+
+# Restore
+registry.restore_plugin_backup("meu_plugin", backup)
+```
+
+#### Changelog e Comparação de Versões
+```python
+# Obter changelog
+registry.get_plugin_changelog("meu_plugin")
+
+# Comparar versões
+registry.compare_plugin_versions("meu_plugin", "1.0.0", "2.0.0")
+```
+
+#### Marketplace com Avaliações
+```python
+# Avaliar plugin
+registry.submit_plugin_rating("meu_plugin", 5, "Excelente!", "user123")
+
+# Ver avaliações
+registry.get_plugin_ratings("meu_plugin")
+
+# Marketplace completo
+registry.get_marketplace_plugins()
+```
+
+#### Notificações de Atualização
+```python
+# Verificar atualizações com notificação
+registry.check_for_updates_with_notification("meu_plugin")
+
+# Verificar todas
+registry.check_all_updates_notify()
+```
+
+### Novos Plugins de Exemplo (Phase 2 Avançado)
+
+- `weather_service.py` — API weather com cost tracking, i18n (en/pt/es), webhooks, health checks, migrações
+- `smart_recommendations.py` — Recomendações com A/B testing, ACLs, collaborative filtering
+- `scheduled_monitor.py` — Monitoramento agendado (cron), metrics streaming, health checks
+- `network_tools.py` — Requisições HTTP com PLUGIN_SETTINGS
+- `text_processor.py` — Processamento sandboxado com resource quotas e audit_log
+- `data_analyzer.py` — Análise de dados com plugin.call capability
+- `lifecycle_demo.py` — Demonstra todos os 5 hooks de ciclo de vida
+- `plugin_caller.py` — Demonstra plugin.call capability
+
 ## 🛠️ Como Contribuir (Desenvolvedores)
 
 O Jarvis-Code foi feito para crescer. Se você deseja adicionar novas funcionalidades:
