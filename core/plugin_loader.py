@@ -189,6 +189,11 @@ class PluginRecord:
     signer: str = ""     # who signed it
     verified: bool = False  # signature verification result
 
+    # Phase 2: Categorization and favorites
+    category: str = ""   # plugin category (utility, media, system, ai, etc.)
+    tags: list[str] = field(default_factory=list)  # user-defined tags
+    favorite: bool = False  # user marked as favorite
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -703,6 +708,56 @@ if __name__ == "__main__":
             self._logger(f"[SYS] [PluginLoader] Debug mode disabled for '{plugin_name}'")
             return True
         return False
+
+    # Phase 2: Categorization and favorites
+    def set_category(self, plugin_name: str, category: str) -> bool:
+        """Set a plugin's category."""
+        rec = self._plugins.get(plugin_name)
+        if rec:
+            rec.category = category
+            self._logger(f"[SYS] [PluginLoader] Category set for '{plugin_name}': {category}")
+            return True
+        return False
+
+    def add_tag(self, plugin_name: str, tag: str) -> bool:
+        """Add a tag to a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if rec and tag not in rec.tags:
+            rec.tags.append(tag)
+            self._logger(f"[SYS] [PluginLoader] Tag added to '{plugin_name}': {tag}")
+            return True
+        return False
+
+    def remove_tag(self, plugin_name: str, tag: str) -> bool:
+        """Remove a tag from a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if rec and tag in rec.tags:
+            rec.tags.remove(tag)
+            self._logger(f"[SYS] [PluginLoader] Tag removed from '{plugin_name}': {tag}")
+            return True
+        return False
+
+    def toggle_favorite(self, plugin_name: str) -> bool:
+        """Toggle a plugin's favorite status."""
+        rec = self._plugins.get(plugin_name)
+        if rec:
+            rec.favorite = not rec.favorite
+            status = "added to" if rec.favorite else "removed from"
+            self._logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' {status} favorites")
+            return True
+        return False
+
+    def get_favorites(self) -> list[str]:
+        """Get list of favorite plugin names."""
+        return [name for name, rec in self._plugins.items() if rec.favorite]
+
+    def get_by_category(self, category: str) -> list[str]:
+        """Get plugin names by category."""
+        return [name for name, rec in self._plugins.items() if rec.category == category]
+
+    def get_by_tag(self, tag: str) -> list[str]:
+        """Get plugin names by tag."""
+        return [name for name, rec in self._plugins.items() if tag in rec.tags]
 
     def _save_capabilities(self) -> None:
         """Persist granted capabilities to config."""
