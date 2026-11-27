@@ -29,6 +29,16 @@ from typing import Callable, Optional
 
 from memory.config_manager import get_plugin_enabled, get_plugin_config
 
+# Hot-reload: watchdog is optional; if absent, hot-reload is silently disabled
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+    _WATCHDOG_AVAILABLE = True
+except Exception:
+    _WATCHDOG_AVAILABLE = False
+    FileSystemEventHandler = object  # type: ignore
+    Observer = None  # type: ignore
+
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 
@@ -373,6 +383,132 @@ if __name__ == "__main__":
             if isinstance(granted, list):
                 rec.granted_capabilities = [c for c in granted if c in _VALID_CAPABILITIES]
 
+    # Phase 2: Hot-reload via filesystem watchdog
+    def start_hot_reload(self, plugins_dir: Path, core_tool_names: set[str]) -> bool:
+        """Start watching the plugins directory for changes.
+
+        Returns True if watchdog is available and watcher started.
+        If watchdog is not installed, hot-reload is silently disabled.
+        """
+        if not _WATCHDOG_AVAILABLE:
+            self._logger("[SYS] [PluginLoader] Hot-reload unavailable: watchdog not installed")
+            return False
+
+        if hasattr(self, '_observer') and self._observer is not None:
+            self._logger("[SYS] [PluginLoader] Hot-reload already running")
+            return True
+
+        class PluginFileHandler(FileSystemEventHandler):
+            def __init__(self, registry):
+                self.registry = registry
+                self._last_event = 0
+
+            def on_modified(self, event):
+                if event.is_directory:
+                    return
+                path = Path(event.src_path)
+                if path.suffix != ".py" or path.name.startswith("_"):
+                    return
+                # Debounce: ignore events within 500ms of each other
+                now = time.time()
+                if now - self._last_event < 0.5:
+                    return
+                self._last_event = now
+                self.registry._reload_plugin(path, core_tool_names)
+
+            def on_created(self, event):
+                self.on_modified(event)
+
+            def on_deleted(self, event):
+                if event.is_directory:
+                    return
+                path = Path(event.src_path)
+                if path.suffix != ".py" or path.name.startswith("_"):
+                    return
+                self.registry._unload_plugin(path.stem)
+
+        self._observer = Observer()
+        self._observer.schedule(PluginFileHandler(self), str(plugins_dir), recursive=False)
+        self._observer.start()
+        self._plugins_dir = plugins_dir
+        self._core_tool_names = core_tool_names
+        self._logger("[SYS] [PluginLoader] Hot-reload started")
+        return True
+
+    def stop_hot_reload(self) -> None:
+        """Stop the filesystem watcher."""
+        if hasattr(self, '_observer') and self._observer is not None:
+            self._observer.stop()
+            self._observer.join(timeout=2.0)
+            self._observer = None
+            self._logger("[SYS] [PluginLoader] Hot-reload stopped")
+
+    def _reload_plugin(self, path: Path, core_tool_names: set[str]) -> None:
+        """Reload a single plugin file, preserving its state."""
+        import importlib
+        import sys
+
+        module_name = f"plugins.{path.stem}"
+
+        # Preserve state from old record if it exists
+        old_rec = self._plugins.get(path.stem)
+        old_state = old_rec._state if old_rec else {}
+        old_granted = old_rec.granted_capabilities if old_rec else []
+        old_reload_count = old_rec._reload_count if old_rec else 0
+        old_last_modified = path.stat().st_mtime if path.exists() else 0
+
+        try:
+            # Remove old module from sys.modules
+            if module_name in sys.modules:
+                del sys.modules[module_name]
+
+            # Import fresh
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("could not build import spec")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            # Validate
+            rec = _validate(module, path.name)
+
+            if rec.valid and rec.name in core_tool_names:
+                rec = PluginRecord(name=rec.name, file=path.name,
+                                    error=f"Name '{rec.name}' collides with a core tool — rejected.")
+            elif rec.valid and rec.name in self._plugins and rec.name != path.stem:
+                other = self._plugins[rec.name].file
+                rec = PluginRecord(name=rec.name, file=path.name,
+                                    error=f"Name '{rec.name}' already used by plugin '{other}' — rejected.")
+
+            if rec.valid:
+                # Preserve state across reload
+                rec._state = old_state
+                rec.granted_capabilities = old_granted
+                rec._reload_count = old_reload_count + 1
+                rec._last_modified = old_last_modified
+
+                self._plugins[rec.name] = rec
+                self._logger(f"[SYS] [PluginLoader] Plugin reloaded: {rec.name} ({path.name}, reload #{rec._reload_count})")
+            else:
+                self._logger(f"[SYS] [PluginLoader] Plugin reload failed: {path.name} — {rec.error}")
+                # Remove from plugins if it was there before
+                if path.stem in self._plugins:
+                    del self._plugins[path.stem]
+
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] Plugin reload error: {path.name} — {e}")
+            traceback.print_exc()
+            # Remove from plugins if it was there before
+            if path.stem in self._plugins:
+                del self._plugins[path.stem]
+
+    def _unload_plugin(self, name: str) -> None:
+        """Unload a plugin when its file is deleted."""
+        if name in self._plugins:
+            del self._plugins[name]
+            self._logger(f"[SYS] [PluginLoader] Plugin unloaded: {name}")
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
@@ -574,6 +710,8 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
 
         all_records.append(rec)
         if rec.valid:
+            # Set initial _last_modified from file mtime
+            rec._last_modified = path.stat().st_mtime
             valid[rec.name] = rec
             logger(f"Plugin loaded: {rec.name} ({path.name})")
         else:
@@ -582,6 +720,13 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
     notify = notify or (lambda _msg: None)
     registry = PluginRegistry(valid, logger, notify)
     registry._all_records = all_records
+
+    # Phase 2: Load granted capabilities from config
+    registry.load_granted_capabilities()
+
+    # Phase 2: Start hot-reload watcher
+    registry.start_hot_reload(plugins_dir, core_tool_names)
+
     rejected = len(all_records) - len(valid)
     logger(f"Plugin discovery complete: {len(valid)} active, "
            f"{rejected} rejected, {len(all_records)} total.")
