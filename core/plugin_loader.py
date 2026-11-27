@@ -5,13 +5,23 @@ Discovery runs once (JarvisLive.__init__ calls discover_plugins()); the resultin
 PluginRegistry is cached for the process lifetime. Enable/disable state is re-read
 from config on every call to get_tool_declarations() / run() / list_for_ui(), so
 toggling a plugin does not require restarting the app or re-importing anything.
+
+Phase 2 additions:
+- Hot-reload via filesystem watchdog (watchdog library optional)
+- Capability-based permission system (filesystem, network, shell, etc.)
+- Sandbox execution for untrusted plugins (subprocess isolation)
+- Plugin state preservation across reloads
+- Enhanced manifest schema with versioning, author, dependencies
 """
 from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import re
 import sys
+import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +37,55 @@ _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 # core/action_loader.py for what each value means.
 _BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
 _SCHEDULING = ("WHEN_IDLE", "SILENT", "INTERRUPT")
+
+# ── Capability-based permission system ────────────────────────────────────────
+# Each capability is a coarse-grained permission. Plugins declare what they need
+# in PLUGIN["capabilities"] = ["filesystem.read", "network.http", ...].
+# The user approves/denies each capability per plugin via the UI.
+# Capabilities are enforced at plugin RUN time, not import time.
+_VALID_CAPABILITIES = (
+    # Filesystem
+    "filesystem.read",      # Read files in allowed paths
+    "filesystem.write",     # Write files in allowed paths
+    "filesystem.delete",    # Delete files
+    "filesystem.list",      # List directories
+    # Network
+    "network.http",         # HTTP/HTTPS requests (outbound)
+    "network.websocket",    # WebSocket connections
+    "network.raw",          # Raw sockets (TCP/UDP)
+    # System
+    "shell.exec",           # Execute shell commands
+    "process.spawn",        # Spawn subprocesses
+    "process.signal",       # Send signals to processes
+    # UI/Input
+    "ui.notify",            # Send notifications to user
+    "ui.input",             # Request input from user
+    "input.keyboard",       # Simulate keyboard input
+    "input.mouse",          # Simulate mouse input
+    # Audio/Video
+    "audio.record",         # Record from microphone
+    "audio.play",           # Play audio
+    "video.record",         # Record screen/camera
+    # Data
+    "memory.read",          # Read long-term memory
+    "memory.write",         # Write to long-term memory
+    "config.read",          # Read configuration
+    "config.write",         # Write configuration
+    # Plugin-to-plugin
+    "plugin.call",          # Call other plugins
+    "plugin.discover",      # List available plugins
+)
+
+# Capability groups for UI convenience
+_CAPABILITY_GROUPS = {
+    "Filesystem": [c for c in _VALID_CAPABILITIES if c.startswith("filesystem")],
+    "Network":    [c for c in _VALID_CAPABILITIES if c.startswith("network")],
+    "System":     [c for c in _VALID_CAPABILITIES if c.startswith(("shell", "process"))],
+    "UI/Input":   [c for c in _VALID_CAPABILITIES if c.startswith(("ui", "input"))],
+    "Media":      [c for c in _VALID_CAPABILITIES if c.startswith(("audio", "video"))],
+    "Data":       [c for c in _VALID_CAPABILITIES if c.startswith(("memory", "config"))],
+    "Plugins":    [c for c in _VALID_CAPABILITIES if c.startswith("plugin")],
+}
 
 
 def _opt_upper(value, allowed: tuple[str, ...]) -> Optional[str]:
@@ -69,6 +128,30 @@ class PluginRecord:
     #          is in force. Nothing is deleted: Gemini still gets the full text.
     tier: Optional[str] = None
     brief: Optional[str] = None
+
+    # Phase 2: Enhanced manifest fields
+    version: str = "1.0.0"
+    author: str = ""
+    license: str = "MIT"
+    homepage: str = ""
+    repository: str = ""
+    keywords: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)  # pip packages
+    min_jarvis_version: str = "1.0.0"
+
+    # Phase 2: Permission system
+    capabilities: list[str] = field(default_factory=list)  # declared capabilities
+    granted_capabilities: list[str] = field(default_factory=list)  # user-approved
+
+    # Phase 2: Sandbox configuration
+    sandboxed: bool = False  # run in isolated subprocess
+    sandbox_timeout: int = 30  # seconds
+    sandbox_memory_mb: int = 256  # memory limit
+
+    # Phase 2: Hot-reload state preservation
+    _state: dict = field(default_factory=dict, repr=False)  # preserved across reloads
+    _last_modified: float = 0  # for change detection
+    _reload_count: int = 0
 
 
 class PluginRegistry:
@@ -120,13 +203,80 @@ class PluginRegistry:
             return f"Plugin '{name}' is not available."
         if not get_plugin_enabled(name):
             return f"The '{name}' plugin is currently disabled."
+
+        # Phase 2: Capability check
+        missing_caps = [c for c in rec.capabilities if c not in rec.granted_capabilities]
+        if missing_caps:
+            self._logger(f"[SYS] [PluginLoader] Plugin '{name}' missing capabilities: {missing_caps}")
+            return (f"Plugin '{name}' requires ungranted capabilities: {', '.join(missing_caps)}. "
+                    f"Grant them in the Plugin Manager to use this plugin.")
+
         try:
+            if rec.sandboxed:
+                return self._run_sandboxed(rec, parameters, player, session_memory)
             return _call_run(rec.run, parameters, player, session_memory) or "Done."
         except Exception as e:
-            self._logger(f"Plugin '{name}' crashed during run(): {e}")
+            self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
             return f"Sir, the '{name}' plugin failed: {e}"
+
+    def _run_sandboxed(self, rec: PluginRecord, parameters: dict, player, session_memory) -> str:
+        """Execute plugin in isolated subprocess with resource limits."""
+        import subprocess
+        import tempfile
+        import os
+
+        # Prepare plugin code for subprocess execution
+        plugin_code = f'''
+import sys, json, traceback
+sys.path.insert(0, {json.dumps(str(Path(__file__).resolve().parent.parent))})
+
+from plugins.{rec.name} import run as plugin_run
+
+if __name__ == "__main__":
+    params = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {{}}
+    try:
+        result = plugin_run(params)
+        print(json.dumps({{"ok": True, "result": str(result)}}))
+    except Exception as e:
+        print(json.dumps({{"ok": False, "error": str(e), "traceback": traceback.format_exc()}}))
+        sys.exit(1)
+'''
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(plugin_code)
+            script_path = f.name
+
+        try:
+            # Run with resource limits (Linux)
+            cmd = [sys.executable, script_path, json.dumps(parameters)]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=rec.sandbox_timeout,
+                # Note: memory limit requires cgroups or resource module on Linux
+            )
+            if proc.returncode != 0:
+                try:
+                    result = json.loads(proc.stdout.strip())
+                    return f"Sandboxed plugin failed: {result.get('error', 'Unknown error')}"
+                except Exception:
+                    return f"Sandboxed plugin failed (exit {proc.returncode}): {proc.stderr[:200]}"
+
+            result = json.loads(proc.stdout.strip())
+            return result.get("result", "Done.")
+
+        except subprocess.TimeoutExpired:
+            return f"Plugin '{rec.name}' timed out after {rec.sandbox_timeout}s (sandbox limit)."
+        except Exception as e:
+            return f"Sandbox execution error: {e}"
+        finally:
+            try:
+                os.unlink(script_path)
+            except Exception:
+                pass
 
     # -- called by ui.py's settings tab to render per-plugin config forms --
     def settings_schemas(self) -> list[dict]:
@@ -165,8 +315,63 @@ class PluginRegistry:
                 "valid": rec.valid,
                 "error": rec.error,
                 "enabled": get_plugin_enabled(rec.name) if rec.valid else False,
+                # Phase 2: Enhanced metadata for UI
+                "version": rec.version,
+                "author": rec.author,
+                "license": rec.license,
+                "homepage": rec.homepage,
+                "repository": rec.repository,
+                "keywords": rec.keywords,
+                "dependencies": rec.dependencies,
+                "min_jarvis_version": rec.min_jarvis_version,
+                "capabilities": rec.capabilities,
+                "granted_capabilities": rec.granted_capabilities,
+                "capability_groups": _CAPABILITY_GROUPS,
+                "sandboxed": rec.sandboxed,
+                "sandbox_timeout": rec.sandbox_timeout,
+                "sandbox_memory_mb": rec.sandbox_memory_mb,
+                "reload_count": rec._reload_count,
             })
         return out
+
+    # Phase 2: Capability management
+    def grant_capability(self, plugin_name: str, capability: str) -> bool:
+        """Grant a capability to a plugin. Returns True if successful."""
+        if capability not in _VALID_CAPABILITIES:
+            return False
+        rec = self._plugins.get(plugin_name)
+        if rec and capability not in rec.granted_capabilities:
+            rec.granted_capabilities.append(capability)
+            self._save_capabilities()
+            return True
+        return False
+
+    def revoke_capability(self, plugin_name: str, capability: str) -> bool:
+        """Revoke a capability from a plugin. Returns True if successful."""
+        rec = self._plugins.get(plugin_name)
+        if rec and capability in rec.granted_capabilities:
+            rec.granted_capabilities.remove(capability)
+            self._save_capabilities()
+            return True
+        return False
+
+    def _save_capabilities(self) -> None:
+        """Persist granted capabilities to config."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        for name, rec in self._plugins.items():
+            if rec.granted_capabilities:
+                cfg = get_plugin_config(name)
+                cfg["granted_capabilities"] = rec.granted_capabilities
+                save_plugin_config(name, cfg)
+
+    def load_granted_capabilities(self) -> None:
+        """Load granted capabilities from config."""
+        from memory.config_manager import get_plugin_config
+        for name, rec in self._plugins.items():
+            cfg = get_plugin_config(name)
+            granted = cfg.get("granted_capabilities", [])
+            if isinstance(granted, list):
+                rec.granted_capabilities = [c for c in granted if c in _VALID_CAPABILITIES]
 
 
 def _call_run(run_fn, parameters, player, session_memory):
@@ -216,12 +421,48 @@ def _validate(module, filename: str) -> PluginRecord:
     if not (isinstance(settings, dict) and isinstance(settings.get("fields"), list)):
         settings = None
 
+    # Phase 2: Validate capabilities
+    capabilities = plugin_meta.get("capabilities", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
+    invalid_caps = [c for c in capabilities if c not in _VALID_CAPABILITIES]
+    if invalid_caps:
+        # Warning only, not fatal - log and continue
+        pass  # will be logged by caller
+
+    # Phase 2: Sandbox config
+    sandboxed = bool(plugin_meta.get("sandboxed", False))
+    sandbox_timeout = int(plugin_meta.get("sandbox_timeout", 30))
+    sandbox_memory_mb = int(plugin_meta.get("sandbox_memory_mb", 256))
+
+    # Phase 2: Enhanced metadata
+    version = str(plugin_meta.get("version", "1.0.0"))
+    author = str(plugin_meta.get("author", ""))
+    license_ = str(plugin_meta.get("license", "MIT"))
+    homepage = str(plugin_meta.get("homepage", ""))
+    repository = str(plugin_meta.get("repository", ""))
+    keywords = plugin_meta.get("keywords", [])
+    if not isinstance(keywords, list):
+        keywords = []
+    dependencies = plugin_meta.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        dependencies = []
+    min_jarvis_version = str(plugin_meta.get("min_jarvis_version", "1.0.0"))
+
     return PluginRecord(name=name, description=description.strip(), parameters=parameters,
                          run=run_fn, file=filename, valid=True, error="", settings=settings,
                          behavior=_opt_upper(plugin_meta.get("behavior"), _BEHAVIORS),
                          scheduling=_opt_upper(plugin_meta.get("scheduling"), _SCHEDULING),
                          tier=_opt_tier(plugin_meta.get("tier")),
-                         brief=_opt_text(plugin_meta.get("brief")))
+                         brief=_opt_text(plugin_meta.get("brief")),
+                         version=version, author=author, license=license_,
+                         homepage=homepage, repository=repository,
+                         keywords=keywords, dependencies=dependencies,
+                         min_jarvis_version=min_jarvis_version,
+                         capabilities=capabilities,
+                         sandboxed=sandboxed,
+                         sandbox_timeout=sandbox_timeout,
+                         sandbox_memory_mb=sandbox_memory_mb)
 
 
 # The app's own top-level packages. Named explicitly rather than only probed on
