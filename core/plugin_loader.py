@@ -1640,6 +1640,359 @@ if __name__ == "__main__":
             "full": list(_VALID_CAPABILITIES),
         }
 
+    # Phase 2: Plugin scheduling/cron-like execution
+    def schedule_plugin(self, plugin_name: str, cron_expression: str, parameters: dict = None) -> bool:
+        """Schedule a plugin to run periodically using cron expression.
+
+        Args:
+            plugin_name: Name of the plugin to schedule
+            cron_expression: Standard 5-field cron (e.g., "0 * * * *" = hourly)
+            parameters: Parameters to pass to the plugin
+
+        Returns True if scheduling succeeded.
+        """
+        try:
+            from croniter import croniter
+            # Validate cron expression
+            croniter(cron_expression)
+        except ImportError:
+            self._logger("[SYS] [PluginLoader] croniter not available for scheduling")
+            return False
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] Invalid cron expression: {e}")
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.valid:
+            return False
+
+        # Store schedule in plugin config
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "schedules" not in config:
+            config["schedules"] = []
+        config["schedules"].append({
+            "cron": cron_expression,
+            "parameters": parameters or {},
+            "enabled": True,
+            "created_at": time.time(),
+        })
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Scheduled '{plugin_name}' with cron '{cron_expression}'")
+        return True
+
+    def unschedule_plugin(self, plugin_name: str, cron_expression: str = None) -> bool:
+        """Remove a scheduled plugin run.
+
+        If cron_expression is provided, remove only that schedule.
+        Otherwise, remove all schedules for the plugin.
+        """
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        schedules = config.get("schedules", [])
+
+        if cron_expression:
+            schedules = [s for s in schedules if s.get("cron") != cron_expression]
+        else:
+            schedules = []
+
+        config["schedules"] = schedules
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def get_scheduled_plugins(self) -> dict:
+        """Get all scheduled plugin runs."""
+        from memory.config_manager import get_plugin_config
+        scheduled = {}
+        for name, rec in self._plugins.items():
+            config = get_plugin_config(name)
+            schedules = config.get("schedules", [])
+            if schedules:
+                scheduled[name] = schedules
+        return scheduled
+
+    def run_scheduled_plugins(self, player=None, session_memory=None) -> dict:
+        """Check and run any scheduled plugins that are due.
+
+        This should be called periodically (e.g., every minute) by the main app.
+        Returns dict of plugin_name -> result for plugins that ran.
+        """
+        try:
+            from croniter import croniter
+        except ImportError:
+            return {"error": "croniter not available"}
+
+        import time
+        now = time.time()
+        results = {}
+
+        scheduled = self.get_scheduled_plugins()
+        for plugin_name, schedules in scheduled.items():
+            for schedule in schedules:
+                if not schedule.get("enabled", True):
+                    continue
+
+                cron_expr = schedule.get("cron")
+                if not cron_expr:
+                    continue
+
+                try:
+                    # Check if this schedule is due
+                    cron = croniter(cron_expr, now - 60)  # Check last minute
+                    next_run = cron.get_next(float)
+
+                    # If next_run is within the last minute, it's due
+                    if abs(next_run - now) < 60:
+                        params = schedule.get("parameters", {})
+                        result = self.run(plugin_name, params, player, session_memory)
+                        results[plugin_name] = result
+                        self._logger(f"[SYS] [PluginLoader] Ran scheduled plugin '{plugin_name}'")
+                except Exception as e:
+                    self._logger(f"[SYS] [PluginLoader] Scheduled plugin '{plugin_name}' failed: {e}")
+
+        return results
+
+    # Phase 2: Plugin profiling/performance analysis
+    def profile_plugin(self, plugin_name: str, sample_parameters: dict = None,
+                       iterations: int = 10, player=None, session_memory=None) -> dict:
+        """Profile a plugin's performance over multiple runs.
+
+        Args:
+            plugin_name: Name of the plugin to profile
+            sample_parameters: Parameters to use for profiling runs
+            iterations: Number of profiling iterations
+            player: Player instance
+            session_memory: Session memory
+
+        Returns dict with performance statistics.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.valid:
+            return {"error": f"Plugin '{plugin_name}' not found or invalid"}
+
+        import time
+        import statistics
+
+        times = []
+        errors = 0
+        results = []
+
+        for i in range(iterations):
+            start = time.perf_counter()
+            try:
+                result = self.run(plugin_name, sample_parameters or {}, player, session_memory)
+                elapsed = time.perf_counter() - start
+                times.append(elapsed)
+                results.append(result)
+            except Exception as e:
+                errors += 1
+                results.append(str(e))
+
+        if not times:
+            return {"error": "All profiling runs failed"}
+
+        return {
+            "plugin": plugin_name,
+            "iterations": iterations,
+            "successful_runs": len(times),
+            "errors": errors,
+            "min_time": min(times),
+            "max_time": max(times),
+            "mean_time": statistics.mean(times),
+            "median_time": statistics.median(times),
+            "stdev_time": statistics.stdev(times) if len(times) > 1 else 0,
+            "total_time": sum(times),
+            "sample_results": results[:3],  # First 3 results
+        }
+
+    def get_plugin_profile(self, plugin_name: str) -> dict:
+        """Get cached profile data for a plugin."""
+        # This would be stored in config - for now return empty
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        return config.get("profile", {})
+
+    def save_plugin_profile(self, plugin_name: str, profile_data: dict) -> bool:
+        """Save profile data for a plugin."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["profile"] = profile_data
+        config["profiled_at"] = time.time()
+        save_plugin_config(plugin_name, config)
+        return True
+
+    # Phase 2: Plugin metrics export (Prometheus-compatible)
+    def export_metrics_prometheus(self) -> str:
+        """Export plugin metrics in Prometheus format.
+
+        Returns string with metrics in Prometheus text format.
+        """
+        lines = [
+            "# HELP jarvis_plugin_runs_total Total number of plugin runs",
+            "# TYPE jarvis_plugin_runs_total counter",
+        ]
+
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                lines.append(f'jarvis_plugin_runs_total{{plugin="{name}"}} {rec._run_count}')
+
+        lines.extend([
+            "",
+            "# HELP jarvis_plugin_run_time_seconds Total time spent running plugins",
+            "# TYPE jarvis_plugin_run_time_seconds counter",
+        ])
+
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                lines.append(f'jarvis_plugin_run_time_seconds{{plugin="{name}"}} {rec._total_run_time}')
+
+        lines.extend([
+            "",
+            "# HELP jarvis_plugin_success_rate Plugin success rate percentage",
+            "# TYPE jarvis_plugin_success_rate gauge",
+        ])
+
+        for name, rec in self._plugins.items():
+            if rec.valid and rec._run_count > 0:
+                success_rate = (rec._success_count / rec._run_count) * 100
+                lines.append(f'jarvis_plugin_success_rate{{plugin="{name}"}} {success_rate:.2f}')
+
+        lines.extend([
+            "",
+            "# HELP jarvis_plugin_last_run_timestamp Unix timestamp of last plugin run",
+            "# TYPE jarvis_plugin_last_run_timestamp gauge",
+        ])
+
+        for name, rec in self._plugins.items():
+            if rec.valid and rec._last_run > 0:
+                lines.append(f'jarvis_plugin_last_run_timestamp{{plugin="{name}"}} {rec._last_run}')
+
+        lines.extend([
+            "",
+            "# HELP jarvis_plugin_circuit_state Circuit breaker state (0=closed, 1=half-open, 2=open)",
+            "# TYPE jarvis_plugin_circuit_state gauge",
+        ])
+
+        state_map = {"closed": 0, "half-open": 1, "open": 2}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                state = state_map.get(rec._circuit_state, 0)
+                lines.append(f'jarvis_plugin_circuit_state{{plugin="{name}"}} {state}')
+
+        lines.extend([
+            "",
+            "# HELP jarvis_plugin_reload_count Number of times plugin was hot-reloaded",
+            "# TYPE jarvis_plugin_reload_count counter",
+        ])
+
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                lines.append(f'jarvis_plugin_reload_count{{plugin="{name}"}} {rec._reload_count}')
+
+        return "\n".join(lines)
+
+    # Phase 2: Plugin rollback/versioning
+    def create_plugin_snapshot(self, plugin_name: str) -> dict:
+        """Create a snapshot of a plugin's current state for rollback.
+
+        Returns snapshot dict with plugin state.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"error": "Plugin module not loaded"}
+
+        import inspect
+        source = inspect.getsource(module)
+
+        snapshot = {
+            "plugin_name": plugin_name,
+            "version": rec.version,
+            "source_code": source,
+            "granted_capabilities": rec.granted_capabilities.copy(),
+            "debug": rec.debug,
+            "sandboxed": rec.sandboxed,
+            "sandbox_timeout": rec.sandbox_timeout,
+            "sandbox_memory_mb": rec.sandbox_memory_mb,
+            "priority": rec.priority,
+            "category": rec.category,
+            "tags": rec.tags.copy(),
+            "favorite": rec.favorite,
+            "created_at": time.time(),
+        }
+
+        # Store in plugin config
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "snapshots" not in config:
+            config["snapshots"] = []
+        config["snapshots"].append(snapshot)
+        # Keep only last 10 snapshots
+        config["snapshots"] = config["snapshots"][-10:]
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Created snapshot for '{plugin_name}'")
+        return snapshot
+
+    def rollback_plugin(self, plugin_name: str, snapshot_index: int = -1) -> bool:
+        """Rollback a plugin to a previous snapshot.
+
+        Args:
+            plugin_name: Name of the plugin to rollback
+            snapshot_index: Index of snapshot to rollback to (-1 = latest)
+
+        Returns True if rollback succeeded.
+        """
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        snapshots = config.get("snapshots", [])
+
+        if not snapshots:
+            return False
+
+        snapshot = snapshots[snapshot_index]
+
+        # Apply snapshot settings
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        rec.granted_capabilities = snapshot.get("granted_capabilities", [])
+        rec.debug = snapshot.get("debug", False)
+        rec.sandboxed = snapshot.get("sandboxed", False)
+        rec.sandbox_timeout = snapshot.get("sandbox_timeout", 30)
+        rec.sandbox_memory_mb = snapshot.get("sandbox_memory_mb", 256)
+        rec.priority = snapshot.get("priority", 0)
+        rec.category = snapshot.get("category", "")
+        rec.tags = snapshot.get("tags", [])
+        rec.favorite = snapshot.get("favorite", False)
+
+        self._save_capabilities()
+
+        self._logger(f"[SYS] [PluginLoader] Rolled back '{plugin_name}' to snapshot from {snapshot.get('created_at')}")
+        return True
+
+    def list_plugin_snapshots(self, plugin_name: str) -> list:
+        """List available snapshots for a plugin."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        snapshots = config.get("snapshots", [])
+        return [
+            {
+                "index": i,
+                "version": s.get("version"),
+                "created_at": s.get("created_at"),
+                "granted_capabilities": s.get("granted_capabilities", []),
+            }
+            for i, s in enumerate(snapshots)
+        ]
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
