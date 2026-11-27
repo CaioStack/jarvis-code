@@ -194,6 +194,9 @@ class PluginRecord:
     tags: list[str] = field(default_factory=list)  # user-defined tags
     favorite: bool = False  # user marked as favorite
 
+    # Phase 2: Priority/ordering
+    priority: int = 0  # execution priority (higher = runs first), 0 = default
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -808,6 +811,24 @@ if __name__ == "__main__":
     def get_by_tag(self, tag: str) -> list[str]:
         """Get plugin names by tag."""
         return [name for name, rec in self._plugins.items() if tag in rec.tags]
+
+    # Phase 2: Priority/ordering
+    def set_priority(self, plugin_name: str, priority: int) -> bool:
+        """Set a plugin's execution priority (higher = runs first)."""
+        rec = self._plugins.get(plugin_name)
+        if rec:
+            rec.priority = int(priority)
+            self._logger(f"[SYS] [PluginLoader] Priority set for '{plugin_name}': {priority}")
+            return True
+        return False
+
+    def get_sorted_plugins(self, reverse: bool = True) -> list[str]:
+        """Get plugin names sorted by priority (highest first by default)."""
+        return sorted(
+            self._plugins.keys(),
+            key=lambda n: self._plugins[n].priority,
+            reverse=reverse
+        )
 
     def _save_capabilities(self) -> None:
         """Persist granted capabilities to config."""
