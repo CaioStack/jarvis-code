@@ -232,8 +232,105 @@ Acesse valores em `run()` via `config_manager.get_plugin_config("namespace")`.
 
 - `system_info.py` — Info de CPU, memória, disco, rede (capabilities: filesystem.read, network.http)
 - `safe_calc.py` — Calculadora sandboxada (sandboxed: true, 10s timeout, 64MB)
+- `network_tools.py` — Requisições HTTP (capabilities: network.http, PLUGIN_SETTINGS)
+- `text_processor.py` — Processamento de texto sandboxado (sandboxed, resource quotas, audit_log)
+- `data_analyzer.py` — Análise de dados com plugin.call (usa safe_calc para cálculos)
+- `lifecycle_demo.py` — Demonstra hooks de ciclo de vida (on_load, on_enable, on_disable, on_unload, on_reload)
+- `plugin_caller.py` — Demonstra plugin.call capability
 
 Copie `plugins/_template.py` para começar seu próprio plugin.
+
+### Recursos Avançados do Phase 2
+
+#### Quotas de Recursos
+Plugins podem declarar limites de CPU, memória e disco que são aplicados em tempo de execução:
+```python
+"cpu_quota_percent": 50.0,    # Máximo 50% de CPU
+"memory_quota_mb": 200,       # Máximo 200MB RAM
+"disk_quota_mb": 100,         # Máximo 100MB disco
+```
+
+#### Auditoria (Audit Logging)
+Habilite log de auditoria para compliance:
+```python
+"audit_log": True
+```
+Registra execuções bem-sucedidas e falhas com parâmetros, resultados e tempo.
+
+#### Assinatura Criptográfica Ed25519
+Para produção, use assinaturas Ed25519:
+```python
+# Assinar plugin
+registry.sign_plugin_ed25519("meu_plugin", private_key_bytes, "Developer Name")
+
+# Verificar assinatura
+registry.verify_plugin_ed25519("meu_plugin", public_key_bytes)
+```
+
+#### Verificação de Atualizações
+Verifique atualizações automáticas de plugins do GitHub:
+```python
+# Verificar um plugin
+registry.check_plugin_updates("meu_plugin")
+
+# Verificar todos
+registry.check_all_plugin_updates()
+```
+
+#### Instalação Automática de Dependências
+Instale dependências pip faltantes automaticamente:
+```python
+registry.install_plugin_dependencies("meu_plugin")
+registry.install_all_missing_dependencies()
+```
+
+#### Presets de Capacidades
+Aplique conjuntos predefinidos de capacidades:
+```python
+presets = registry.get_capability_presets()
+# minimal, filesystem, network, system, media, data, full
+registry.apply_capability_preset("meu_plugin", "network")
+```
+
+#### Agendamento (Cron-like)
+Agende plugins para execução periódica:
+```python
+# Agendar execução horária
+registry.schedule_plugin("meu_plugin", "0 * * * *", {"param": "value"})
+
+# Ver agendamentos
+registry.get_scheduled_plugins()
+
+# Executar agendados (chamar periodicamente)
+registry.run_scheduled_plugins(player, session_memory)
+```
+
+#### Perfilamento de Performance
+Analise performance de plugins:
+```python
+profile = registry.profile_plugin("meu_plugin", {"param": "value"}, iterations=10)
+# Retorna: min, max, mean, median, stdev, total_time
+```
+
+#### Exportação de Métricas (Prometheus)
+Exporte métricas para monitoramento:
+```python
+metrics = registry.export_metrics_prometheus()
+# Formato Prometheus text format
+```
+
+#### Snapshots e Rollback
+Crie pontos de restauração de plugins:
+```python
+# Criar snapshot
+registry.create_plugin_snapshot("meu_plugin")
+
+# Listar snapshots
+registry.list_plugin_snapshots("meu_plugin")
+
+# Rollback para snapshot anterior
+registry.rollback_plugin("meu_plugin", -1)  # -1 = mais recente
+```
 
 ## 🛠️ Como Contribuir (Desenvolvedores)
 
