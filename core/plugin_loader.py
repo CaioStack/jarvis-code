@@ -170,6 +170,9 @@ class PluginRecord:
     _last_error: str = ""
     _last_run: float = 0  # timestamp
 
+    # Phase 2: Debug mode
+    debug: bool = False  # enable debug logging for this plugin
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -228,6 +231,10 @@ class PluginRegistry:
             return (f"Plugin '{name}' requires ungranted capabilities: {', '.join(missing_caps)}. "
                     f"Grant them in the Plugin Manager to use this plugin.")
 
+        # Phase 2: Debug logging
+        if rec.debug:
+            self._logger(f"[SYS] [PluginLoader] DEBUG: Running '{name}' with params: {parameters}")
+
         # Phase 2: Performance tracking
         import time
         start_time = time.perf_counter()
@@ -245,6 +252,10 @@ class PluginRegistry:
             rec._total_run_time += elapsed
             rec._last_run_time = elapsed
             rec._last_error = ""
+
+            # Phase 2: Debug logging for result
+            if rec.debug:
+                self._logger(f"[SYS] [PluginLoader] DEBUG: '{name}' completed in {elapsed*1000:.2f}ms: {result[:100]}")
             return result
 
         except Exception as e:
@@ -627,6 +638,25 @@ if __name__ == "__main__":
         if rec and capability in rec.granted_capabilities:
             rec.granted_capabilities.remove(capability)
             self._save_capabilities()
+            return True
+        return False
+
+    # Phase 2: Debug mode
+    def enable_debug(self, plugin_name: str) -> bool:
+        """Enable debug logging for a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if rec:
+            rec.debug = True
+            self._logger(f"[SYS] [PluginLoader] Debug mode enabled for '{plugin_name}'")
+            return True
+        return False
+
+    def disable_debug(self, plugin_name: str) -> bool:
+        """Disable debug logging for a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if rec:
+            rec.debug = False
+            self._logger(f"[SYS] [PluginLoader] Debug mode disabled for '{plugin_name}'")
             return True
         return False
 
