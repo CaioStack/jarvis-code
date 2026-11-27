@@ -2837,6 +2837,439 @@ if __name__ == "__main__":
             "winner": "a" if a_rate > b_rate else "b" if b_rate > a_rate else "tie",
         }
 
+    # Phase 2: Plugin webhook/callback system
+    def register_webhook(self, plugin_name: str, event: str, url: str,
+                          secret: str = None, headers: dict = None) -> bool:
+        """Register a webhook for plugin events.
+
+        Events: plugin_run, plugin_error, plugin_enabled, plugin_disabled,
+                plugin_reloaded, capability_granted, capability_revoked
+
+        Args:
+            plugin_name: Name of the plugin
+            event: Event type to subscribe to
+            url: Webhook URL to call
+            secret: Optional secret for HMAC signature verification
+            headers: Optional additional headers
+
+        Returns True if successful.
+        """
+        valid_events = {
+            "plugin_run", "plugin_error", "plugin_enabled", "plugin_disabled",
+            "plugin_reloaded", "capability_granted", "capability_revoked",
+            "plugin_installed", "plugin_uninstalled", "plugin_updated",
+        }
+
+        if event not in valid_events:
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "webhooks" not in config:
+            config["webhooks"] = []
+
+        config["webhooks"].append({
+            "event": event,
+            "url": url,
+            "secret": secret,
+            "headers": headers or {},
+            "created_at": time.time(),
+            "enabled": True,
+        })
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Registered webhook for '{plugin_name}' on '{event}': {url}")
+        return True
+
+    def unregister_webhook(self, plugin_name: str, url: str) -> bool:
+        """Unregister a webhook by URL."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        webhooks = config.get("webhooks", [])
+
+        original_len = len(webhooks)
+        config["webhooks"] = [w for w in webhooks if w.get("url") != url]
+        save_plugin_config(plugin_name, config)
+
+        return len(config["webhooks"]) < original_len
+
+    def get_webhooks(self, plugin_name: str) -> list:
+        """Get all webhooks for a plugin."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        return config.get("webhooks", [])
+
+    def _trigger_webhooks(self, plugin_name: str, event: str, data: dict) -> None:
+        """Trigger webhooks for an event."""
+        webhooks = self.get_webhooks(plugin_name)
+        event_webhooks = [w for w in webhooks if w.get("event") == event and w.get("enabled", True)]
+
+        if not event_webhooks:
+            return
+
+        try:
+            import httpx
+            import hmac
+            import hashlib
+            import json
+        except ImportError:
+            self._logger("[SYS] [PluginLoader] httpx not available for webhooks")
+            return
+
+        for webhook in event_webhooks:
+            try:
+                url = webhook.get("url")
+                secret = webhook.get("secret")
+                headers = webhook.get("headers", {}).copy()
+
+                payload = json.dumps(data).encode()
+
+                if secret:
+                    signature = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                    headers["X-Jarvis-Signature"] = f"sha256={signature}"
+
+                headers.setdefault("Content-Type", "application/json")
+                headers.setdefault("User-Agent", "Jarvis-Code-Webhook/1.0")
+
+                httpx.post(url, content=payload, headers=headers, timeout=10)
+            except Exception as e:
+                self._logger(f"[SYS] [PluginLoader] Webhook failed for '{plugin_name}' -> {webhook.get('url')}: {e}")
+
+    # Phase 2: Plugin real-time metrics streaming
+    def start_metrics_stream(self, plugin_name: str, interval: float = 1.0) -> bool:
+        """Start streaming real-time metrics for a plugin.
+
+        This creates a background task that periodically emits metrics.
+        The metrics can be consumed via the metrics stream callback.
+
+        Args:
+            plugin_name: Name of the plugin
+            interval: Streaming interval in seconds
+
+        Returns True if streaming started.
+        """
+        import threading
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        # Store stream config
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["metrics_stream"] = {
+            "enabled": True,
+            "interval": interval,
+            "started_at": time.time(),
+        }
+        save_plugin_config(plugin_name, config)
+
+        # Start streaming thread
+        def stream_metrics():
+            while True:
+                from memory.config_manager import get_plugin_config
+                stream_config = get_plugin_config(plugin_name).get("metrics_stream", {})
+                if not stream_config.get("enabled", False):
+                    break
+
+                try:
+                    metrics = self.get_performance(plugin_name)
+                    health = self.get_plugin_health(plugin_name)
+                    budget = self.check_performance_budget(plugin_name)
+
+                    stream_data = {
+                        "plugin": plugin_name,
+                        "timestamp": time.time(),
+                        "performance": metrics,
+                        "health": health,
+                        "budget": budget,
+                    }
+
+                    # Trigger metrics_stream hook
+                    self._trigger_hook("metrics_stream", plugin_name, stream_data)
+
+                    time.sleep(interval)
+                except Exception as e:
+                    self._logger(f"[SYS] [PluginLoader] Metrics stream error for '{plugin_name}': {e}")
+                    break
+
+        thread = threading.Thread(target=stream_metrics, daemon=True)
+        thread.start()
+
+        self._logger(f"[SYS] [PluginLoader] Started metrics stream for '{plugin_name}' at {interval}s interval")
+        return True
+
+    def stop_metrics_stream(self, plugin_name: str) -> bool:
+        """Stop streaming metrics for a plugin."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "metrics_stream" in config:
+            config["metrics_stream"]["enabled"] = False
+            save_plugin_config(plugin_name, config)
+            return True
+        return False
+
+    # Phase 2: Plugin configuration validation schema
+    def validate_plugin_config(self, plugin_name: str, config: dict) -> dict:
+        """Validate plugin configuration against its PLUGIN_SETTINGS schema.
+
+        Returns dict with: valid, errors, warnings
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.settings:
+            return {"valid": True, "errors": [], "warnings": ["No settings schema defined"]}
+
+        schema = rec.settings
+        fields = schema.get("fields", [])
+        errors = []
+        warnings = []
+
+        # Check required fields
+        for field in fields:
+            key = field.get("key")
+            required = field.get("required", False)
+            field_type = field.get("type", "string")
+
+            if required and key not in config:
+                errors.append(f"Required field '{key}' is missing")
+                continue
+
+            if key not in config:
+                continue
+
+            value = config[key]
+
+            # Type validation
+            if field_type == "integer":
+                if not isinstance(value, int):
+                    try:
+                        int(value)
+                    except (ValueError, TypeError):
+                        errors.append(f"Field '{key}' must be an integer")
+            elif field_type == "number":
+                if not isinstance(value, (int, float)):
+                    try:
+                        float(value)
+                    except (ValueError, TypeError):
+                        errors.append(f"Field '{key}' must be a number")
+            elif field_type == "boolean":
+                if not isinstance(value, bool):
+                    if isinstance(value, str) and value.lower() in ("true", "false", "1", "0"):
+                        pass  # Acceptable string boolean
+                    else:
+                        errors.append(f"Field '{key}' must be a boolean")
+            elif field_type == "choice":
+                choices = field.get("choices", [])
+                if value not in choices:
+                    errors.append(f"Field '{key}' must be one of: {', '.join(choices)}")
+            elif field_type == "secret":
+                # Secret fields just need to be strings
+                if not isinstance(value, str):
+                    errors.append(f"Field '{key}' must be a string")
+
+            # Range validation for numbers
+            if field_type in ("integer", "number") and isinstance(value, (int, float)):
+                min_val = field.get("min")
+                max_val = field.get("max")
+                if min_val is not None and value < min_val:
+                    errors.append(f"Field '{key}' must be >= {min_val}")
+                if max_val is not None and value > max_val:
+                    errors.append(f"Field '{key}' must be <= {max_val}")
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
+    def get_validated_config(self, plugin_name: str) -> dict:
+        """Get plugin configuration with validation applied."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        validation = self.validate_plugin_config(plugin_name, config)
+        return {
+            "config": config,
+            "validation": validation,
+        }
+
+    # Phase 2: Plugin access control lists (ACLs)
+    def set_plugin_acl(self, plugin_name: str, acl: dict) -> bool:
+        """Set access control list for a plugin.
+
+        ACL dict can contain:
+            - allow_users: List of user IDs allowed to use this plugin
+            - deny_users: List of user IDs denied access
+            - allow_roles: List of roles allowed
+            - deny_roles: List of roles denied
+            - allow_ips: List of IP addresses/CIDR ranges allowed
+            - deny_ips: List of IP addresses/CIDR ranges denied
+            - time_restrictions: Dict with allowed hours/days
+
+        Args:
+            plugin_name: Name of the plugin
+            acl: Access control list dict
+
+        Returns True if successful.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["acl"] = acl
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Set ACL for '{plugin_name}': {acl}")
+        return True
+
+    def check_plugin_acl(self, plugin_name: str, user_id: str = None,
+                          roles: list = None, ip: str = None) -> bool:
+        """Check if a request should be allowed based on plugin ACL.
+
+        Args:
+            plugin_name: Name of the plugin
+            user_id: User ID making the request
+            roles: List of user roles
+            ip: Client IP address
+
+        Returns True if allowed, False if denied.
+        """
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        acl = config.get("acl", {})
+
+        if not acl:
+            return True  # No ACL = allow all
+
+        # Check user allow/deny
+        if user_id:
+            if acl.get("deny_users") and user_id in acl["deny_users"]:
+                return False
+            if acl.get("allow_users") and user_id not in acl["allow_users"]:
+                return False
+
+        # Check role allow/deny
+        if roles:
+            for role in roles:
+                if acl.get("deny_roles") and role in acl["deny_roles"]:
+                    return False
+            if acl.get("allow_roles"):
+                if not any(role in acl["allow_roles"] for role in roles):
+                    return False
+
+        # Check IP allow/deny (simplified - no CIDR support)
+        if ip:
+            if acl.get("deny_ips") and ip in acl["deny_ips"]:
+                return False
+            if acl.get("allow_ips") and ip not in acl["allow_ips"]:
+                return False
+
+        # Check time restrictions
+        time_restrictions = acl.get("time_restrictions")
+        if time_restrictions:
+            import datetime
+            now = datetime.datetime.now()
+            current_hour = now.hour
+            current_weekday = now.weekday()  # 0=Monday
+
+            allowed_hours = time_restrictions.get("allowed_hours")
+            if allowed_hours and current_hour not in allowed_hours:
+                return False
+
+            allowed_days = time_restrictions.get("allowed_days")
+            if allowed_days and current_weekday not in allowed_days:
+                return False
+
+        return True
+
+    # Phase 2: Plugin usage analytics
+    def get_usage_analytics(self, plugin_name: str, days: int = 30) -> dict:
+        """Get usage analytics for a plugin over the specified period.
+
+        Returns dict with: total_runs, unique_users, avg_daily_runs,
+                           success_rate, avg_latency, error_breakdown,
+                           capability_usage, time_series
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        # Get event log
+        events = self.get_plugin_event_log(plugin_name, limit=10000)
+        if not events:
+            return {"message": "No usage data available"}
+
+        import time
+        cutoff = time.time() - (days * 86400)
+        recent_events = [e for e in events if e.get("timestamp", 0) > cutoff]
+
+        if not recent_events:
+            return {"message": f"No usage data in last {days} days"}
+
+        # Analyze events
+        runs = [e for e in recent_events if e.get("event_type") == "run_start"]
+        errors = [e for e in recent_events if e.get("event_type") == "run_error"]
+
+        total_runs = len(runs)
+        total_errors = len(errors)
+        success_rate = ((total_runs - total_errors) / total_runs * 100) if total_runs > 0 else 0
+
+        # Unique users (if tracked)
+        users = set()
+        for e in runs:
+            data = e.get("data", {})
+            if "user_id" in data:
+                users.add(data["user_id"])
+
+        # Average latency
+        latencies = []
+        for e in recent_events:
+            if e.get("event_type") == "run_end":
+                data = e.get("data", {})
+                if "elapsed" in data:
+                    latencies.append(data["elapsed"])
+
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0
+
+        # Error breakdown
+        error_types = {}
+        for e in errors:
+            data = e.get("data", {})
+            error = data.get("error", "Unknown")
+            error_types[error] = error_types.get(error, 0) + 1
+
+        # Time series (daily buckets)
+        daily_runs = {}
+        for e in runs:
+            ts = e.get("timestamp", 0)
+            day = time.strftime("%Y-%m-%d", time.localtime(ts))
+            daily_runs[day] = daily_runs.get(day, 0) + 1
+
+        return {
+            "plugin": plugin_name,
+            "period_days": days,
+            "total_runs": total_runs,
+            "unique_users": len(users),
+            "avg_daily_runs": total_runs / days if days > 0 else 0,
+            "success_rate": success_rate,
+            "avg_latency_ms": avg_latency * 1000,
+            "error_breakdown": error_types,
+            "time_series": daily_runs,
+        }
+
+    def get_all_usage_analytics(self, days: int = 30) -> dict:
+        """Get usage analytics for all plugins."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                results[name] = self.get_usage_analytics(name, days)
+        return results
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
