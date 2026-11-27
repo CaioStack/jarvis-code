@@ -3270,6 +3270,396 @@ if __name__ == "__main__":
                 results[name] = self.get_usage_analytics(name, days)
         return results
 
+    # Phase 2: Plugin translation/i18n support
+    def get_plugin_translations(self, plugin_name: str, locale: str = "en") -> dict:
+        """Get translations for a plugin.
+
+        Plugins can include a TRANSLATIONS dict with locale keys:
+            TRANSLATIONS = {
+                "en": {"description": "English description", "help": "English help"},
+                "pt": {"description": "Descrição em português", "help": "Ajuda em português"},
+                "es": {"description": "Descripción en español", "help": "Ayuda en español"},
+            }
+
+        Args:
+            plugin_name: Name of the plugin
+            locale: Locale code (en, pt, es, fr, de, etc.)
+
+        Returns dict with translated strings.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"error": "Plugin module not loaded"}
+
+        translations = getattr(module, "TRANSLATIONS", {})
+        if not translations:
+            return {"locale": locale, "translations": {}}
+
+        # Return requested locale or fallback to English
+        if locale in translations:
+            return {"locale": locale, "translations": translations[locale]}
+        elif "en" in translations:
+            return {"locale": "en (fallback)", "translations": translations["en"]}
+        else:
+            # Return first available locale
+            first_locale = next(iter(translations))
+            return {"locale": f"{first_locale} (fallback)", "translations": translations[first_locale]}
+
+    def set_plugin_locale(self, plugin_name: str, locale: str) -> bool:
+        """Set the preferred locale for a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["locale"] = locale
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def get_plugin_locale(self, plugin_name: str) -> str:
+        """Get the preferred locale for a plugin."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        return config.get("locale", "en")
+
+    # Phase 2: Plugin cost tracking (for API-based plugins)
+    def record_plugin_cost(self, plugin_name: str, cost_usd: float,
+                            currency: str = "USD", metadata: dict = None) -> bool:
+        """Record API cost for a plugin run.
+
+        Args:
+            plugin_name: Name of the plugin
+            cost_usd: Cost in USD
+            currency: Currency code (default USD)
+            metadata: Additional metadata (model, tokens, etc.)
+
+        Returns True if recorded.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "costs" not in config:
+            config["costs"] = []
+
+        import time
+        config["costs"].append({
+            "timestamp": time.time(),
+            "cost_usd": cost_usd,
+            "currency": currency,
+            "metadata": metadata or {},
+        })
+
+        # Keep only last 10000 cost records
+        config["costs"] = config["costs"][-10000:]
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def get_plugin_costs(self, plugin_name: str, days: int = 30) -> dict:
+        """Get cost analytics for a plugin."""
+        from memory.config_manager import get_plugin_config
+        import time
+
+        config = get_plugin_config(plugin_name)
+        costs = config.get("costs", [])
+
+        if not costs:
+            return {"total_cost": 0, "currency": "USD", "records": 0}
+
+        cutoff = time.time() - (days * 86400)
+        recent_costs = [c for c in costs if c.get("timestamp", 0) > cutoff]
+
+        total = sum(c.get("cost_usd", 0) for c in recent_costs)
+
+        # Daily breakdown
+        daily = {}
+        for c in recent_costs:
+            day = time.strftime("%Y-%m-%d", time.localtime(c.get("timestamp", 0)))
+            daily[day] = daily.get(day, 0) + c.get("cost_usd", 0)
+
+        # By metadata (e.g., model)
+        by_model = {}
+        for c in recent_costs:
+            meta = c.get("metadata", {})
+            model = meta.get("model", "unknown")
+            by_model[model] = by_model.get(model, 0) + c.get("cost_usd", 0)
+
+        return {
+            "plugin": plugin_name,
+            "period_days": days,
+            "total_cost_usd": total,
+            "currency": "USD",
+            "records": len(recent_costs),
+            "daily_breakdown": daily,
+            "by_model": by_model,
+            "avg_daily_cost": total / days if days > 0 else 0,
+        }
+
+    def get_all_plugin_costs(self, days: int = 30) -> dict:
+        """Get cost analytics for all plugins."""
+        results = {}
+        total = 0
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                cost_data = self.get_plugin_costs(name, days)
+                results[name] = cost_data
+                total += cost_data.get("total_cost_usd", 0)
+
+        results["_total"] = {"total_cost_usd": total, "period_days": days}
+        return results
+
+    # Phase 2: Plugin health checks with alerting
+    def run_health_check(self, plugin_name: str) -> dict:
+        """Run comprehensive health check for a plugin.
+
+        Checks: validity, dependencies, capabilities, performance, budget, errors
+
+        Returns dict with: overall_status, checks, alerts
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        checks = {}
+        alerts = []
+
+        # Validity check
+        checks["valid"] = rec.valid
+        if not rec.valid:
+            alerts.append({"level": "critical", "message": f"Plugin invalid: {rec.error}"})
+
+        # Enabled check
+        from memory.config_manager import get_plugin_enabled
+        enabled = get_plugin_enabled(plugin_name)
+        checks["enabled"] = enabled
+        if not enabled:
+            alerts.append({"level": "warning", "message": "Plugin is disabled"})
+
+        # Dependencies check
+        if rec.dependencies:
+            deps_ok, missing = self.check_dependencies(plugin_name)
+            checks["dependencies"] = {"ok": deps_ok, "missing": missing}
+            if not deps_ok:
+                alerts.append({"level": "critical", "message": f"Missing dependencies: {', '.join(missing)}"})
+        else:
+            checks["dependencies"] = {"ok": True, "missing": []}
+
+        # Capabilities check
+        missing_caps = [c for c in rec.capabilities if c not in rec.granted_capabilities]
+        checks["capabilities"] = {
+            "declared": rec.capabilities,
+            "granted": rec.granted_capabilities,
+            "missing": missing_caps,
+        }
+        if missing_caps:
+            alerts.append({"level": "warning", "message": f"Missing capabilities: {', '.join(missing_caps)}"})
+
+        # Performance check
+        if rec._run_count > 0:
+            perf = self.get_performance(plugin_name)
+            checks["performance"] = perf
+            if perf.get("success_rate", 100) < 90:
+                alerts.append({"level": "warning", "message": f"Low success rate: {perf['success_rate']:.1f}%"})
+            if perf.get("avg_time", 0) > 10:  # 10 seconds
+                alerts.append({"level": "warning", "message": f"High avg latency: {perf['avg_time']:.2f}s"})
+        else:
+            checks["performance"] = {"status": "no_runs"}
+
+        # Budget check
+        budget = self.check_performance_budget(plugin_name)
+        checks["budget"] = budget
+        if not budget.get("within_budget", True):
+            for violation in budget.get("violations", []):
+                alerts.append({"level": "warning", "message": f"Budget violation: {violation}"})
+
+        # Circuit breaker check
+        if rec._circuit_state != "closed":
+            checks["circuit_breaker"] = {"state": rec._circuit_state}
+            alerts.append({"level": "critical", "message": f"Circuit breaker is {rec._circuit_state.upper()}"})
+        else:
+            checks["circuit_breaker"] = {"state": "closed"}
+
+        # Error rate check
+        if rec._run_count > 10:
+            error_rate = (rec._failure_count / rec._run_count) * 100
+            if error_rate > 20:
+                alerts.append({"level": "warning", "message": f"High error rate: {error_rate:.1f}%"})
+
+        # Overall status
+        critical_alerts = [a for a in alerts if a["level"] == "critical"]
+        warning_alerts = [a for a in alerts if a["level"] == "warning"]
+
+        if critical_alerts:
+            overall = "critical"
+        elif warning_alerts:
+            overall = "degraded"
+        else:
+            overall = "healthy"
+
+        return {
+            "plugin": plugin_name,
+            "overall_status": overall,
+            "checks": checks,
+            "alerts": alerts,
+            "checked_at": time.time(),
+        }
+
+    def run_all_health_checks(self) -> dict:
+        """Run health checks for all plugins."""
+        results = {}
+        summary = {"healthy": 0, "degraded": 0, "critical": 0}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                result = self.run_health_check(name)
+                results[name] = result
+                status = result.get("overall_status", "unknown")
+                if status in summary:
+                    summary[status] += 1
+        results["_summary"] = summary
+        return results
+
+    # Phase 2: Plugin migration/upgrade utilities
+    def migrate_plugin_config(self, plugin_name: str, from_version: str,
+                               to_version: str, migrations: dict) -> bool:
+        """Migrate plugin configuration between versions.
+
+        Args:
+            plugin_name: Name of the plugin
+            from_version: Source version
+            to_version: Target version
+            migrations: Dict of version -> migration function name
+
+        Example migrations:
+            migrations = {
+                "1.0.0": "migrate_v1_to_v2",
+                "2.0.0": "migrate_v2_to_v3",
+            }
+
+        The plugin should define migration functions:
+            def migrate_v1_to_v2(config):
+                # Transform config from v1 to v2
+                return new_config
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        current_version = config.get("config_version", "1.0.0")
+
+        # Parse versions
+        def parse_version(v):
+            return tuple(int(x) for x in v.split('.')[:3])
+
+        current = parse_version(current_version)
+        target = parse_version(to_version)
+
+        if current >= target:
+            return True  # Already at or above target
+
+        # Apply migrations in order
+        sorted_versions = sorted(migrations.keys(), key=parse_version)
+        for version in sorted_versions:
+            version_tuple = parse_version(version)
+            if current < version_tuple <= target:
+                migration_fn_name = migrations[version]
+                migration_fn = getattr(module, migration_fn_name, None)
+                if migration_fn and callable(migration_fn):
+                    try:
+                        config = migration_fn(config)
+                        config["config_version"] = version
+                        self._logger(f"[SYS] [PluginLoader] Migrated '{plugin_name}' config to {version}")
+                    except Exception as e:
+                        self._logger(f"[SYS] [PluginLoader] Migration failed for '{plugin_name}': {e}")
+                        return False
+                else:
+                    self._logger(f"[SYS] [PluginLoader] Migration function '{migration_fn_name}' not found")
+                    return False
+
+        config["config_version"] = to_version
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def backup_plugin(self, plugin_name: str, include_source: bool = True) -> dict:
+        """Create a complete backup of a plugin (config, state, source)."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+
+        backup = {
+            "plugin": plugin_name,
+            "version": rec.version,
+            "config": config,
+            "state": {
+                "granted_capabilities": rec.granted_capabilities,
+                "debug": rec.debug,
+                "sandboxed": rec.sandboxed,
+                "priority": rec.priority,
+                "category": rec.category,
+                "tags": rec.tags,
+                "favorite": rec.favorite,
+            },
+            "performance": self.get_performance(plugin_name),
+            "health": self.get_plugin_health(plugin_name),
+            "backed_up_at": time.time(),
+        }
+
+        if include_source:
+            module_name = f"plugins.{rec.name}"
+            import sys
+            module = sys.modules.get(module_name)
+            if module:
+                import inspect
+                backup["source_code"] = inspect.getsource(module)
+
+        return backup
+
+    def restore_plugin_backup(self, plugin_name: str, backup: dict) -> bool:
+        """Restore a plugin from backup."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        # Restore config
+        if "config" in backup:
+            from memory.config_manager import save_plugin_config
+            for key, value in backup["config"].items():
+                save_plugin_config(plugin_name, {key: value})
+
+        # Restore state
+        if "state" in backup:
+            state = backup["state"]
+            rec.granted_capabilities = state.get("granted_capabilities", [])
+            rec.debug = state.get("debug", False)
+            rec.sandboxed = state.get("sandboxed", False)
+            rec.priority = state.get("priority", 0)
+            rec.category = state.get("category", "")
+            rec.tags = state.get("tags", [])
+            rec.favorite = state.get("favorite", False)
+            self._save_capabilities()
+
+        self._logger(f"[SYS] [PluginLoader] Restored backup for '{plugin_name}'")
+        return True
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
