@@ -173,6 +173,13 @@ class PluginRecord:
     # Phase 2: Debug mode
     debug: bool = False  # enable debug logging for this plugin
 
+    # Phase 2: Analytics/usage tracking
+    _success_count: int = 0
+    _failure_count: int = 0
+    _first_run: float = 0
+    _last_success: float = 0
+    _last_failure: float = 0
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -238,7 +245,12 @@ class PluginRegistry:
         # Phase 2: Performance tracking
         import time
         start_time = time.perf_counter()
-        rec._last_run = time.time()
+        now = time.time()
+        rec._last_run = now
+
+        # Track first run
+        if rec._first_run == 0:
+            rec._first_run = now
 
         try:
             if rec.sandboxed:
@@ -252,6 +264,8 @@ class PluginRegistry:
             rec._total_run_time += elapsed
             rec._last_run_time = elapsed
             rec._last_error = ""
+            rec._success_count += 1
+            rec._last_success = now
 
             # Phase 2: Debug logging for result
             if rec.debug:
@@ -265,6 +279,8 @@ class PluginRegistry:
             rec._total_run_time += elapsed
             rec._last_run_time = elapsed
             rec._last_error = str(e)
+            rec._failure_count += 1
+            rec._last_failure = now
             self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
@@ -429,6 +445,7 @@ if __name__ == "__main__":
             return {"error": f"Plugin '{plugin_name}' not found"}
 
         avg_time = rec._total_run_time / rec._run_count if rec._run_count > 0 else 0
+        success_rate = (rec._success_count / rec._run_count * 100) if rec._run_count > 0 else 0
 
         return {
             "run_count": rec._run_count,
@@ -437,6 +454,13 @@ if __name__ == "__main__":
             "last_run_time": rec._last_run_time,
             "last_error": rec._last_error,
             "last_run": rec._last_run,
+            # Analytics
+            "success_count": rec._success_count,
+            "failure_count": rec._failure_count,
+            "success_rate": success_rate,
+            "first_run": rec._first_run,
+            "last_success": rec._last_success,
+            "last_failure": rec._last_failure,
         }
 
     def get_all_performance(self) -> dict[str, dict]:
