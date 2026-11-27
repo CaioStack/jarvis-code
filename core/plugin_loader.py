@@ -184,6 +184,11 @@ class PluginRecord:
     rate_limit: int = 0  # max calls per minute (0 = unlimited)
     _call_timestamps: list = field(default_factory=list, repr=False)  # recent call times
 
+    # Phase 2: Plugin signing/verification
+    signature: str = ""  # cryptographic signature
+    signer: str = ""     # who signed it
+    verified: bool = False  # signature verification result
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -1033,6 +1038,91 @@ if __name__ == "__main__":
         if name in self._plugins:
             del self._plugins[name]
             self._logger(f"[SYS] [PluginLoader] Plugin unloaded: {name}")
+
+    # Phase 2: Plugin signing/verification
+    def verify_plugin_signature(self, plugin_name: str, public_key: str = None) -> dict:
+        """Verify a plugin's cryptographic signature.
+
+        For simplicity, this uses a basic hash-based verification.
+        In production, use proper cryptographic signatures (Ed25519, RSA).
+        """
+        import hashlib
+        import hmac
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"verified": False, "error": f"Plugin '{plugin_name}' not found"}
+
+        if not rec.signature or not rec.signer:
+            return {
+                "verified": False,
+                "error": "Plugin not signed (no signature or signer)",
+                "signer": rec.signer,
+            }
+
+        # Read plugin source and compute hash
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"verified": False, "error": "Plugin module not loaded"}
+
+        import inspect
+        source = inspect.getsource(module)
+
+        # Compute hash of source code
+        expected_hash = hashlib.sha256(source.encode()).hexdigest()
+
+        # For demo: signature is HMAC of hash with a shared secret
+        # In production, verify actual cryptographic signature
+        if public_key:
+            # Verify using provided public key (simplified)
+            computed = hmac.new(public_key.encode(), expected_hash.encode(), hashlib.sha256).hexdigest()
+        else:
+            # No public key provided - just check if signature matches computed hash
+            computed = expected_hash
+
+        verified = hmac.compare_digest(rec.signature, computed)
+
+        return {
+            "verified": verified,
+            "signer": rec.signer,
+            "signature": rec.signature[:16] + "...",
+            "expected_hash": expected_hash[:16] + "...",
+            "verified_at": time.time(),
+        }
+
+    def sign_plugin(self, plugin_name: str, private_key: str, signer: str) -> bool:
+        """Sign a plugin with a private key (for development/trusted plugins).
+
+        Returns True if signing succeeded.
+        """
+        import hmac
+        import hashlib
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return False
+
+        import inspect
+        source = inspect.getsource(module)
+        source_hash = hashlib.sha256(source.encode()).hexdigest()
+
+        # Sign with HMAC (simplified - use proper crypto in production)
+        signature = hmac.new(private_key.encode(), source_hash.encode(), hashlib.sha256).hexdigest()
+
+        rec.signature = signature
+        rec.signer = signer
+        rec.verified = True
+
+        self._logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' signed by '{signer}'")
+        return True
 
 
 def _call_run(run_fn, parameters, player, session_memory):
