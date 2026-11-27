@@ -3879,6 +3879,158 @@ if __name__ == "__main__":
                 results[name] = self.check_for_updates_with_notification(name)
         return results
 
+    # Phase 2: Plugin resource limit enforcement in sandbox
+    def _enforce_sandbox_limits(self, rec: PluginRecord) -> bool:
+        """Enforce resource limits for sandboxed plugins.
+
+        This is called before running a sandboxed plugin to verify
+        the system has enough resources.
+        """
+        try:
+            import psutil
+        except ImportError:
+            return True  # Can't enforce without psutil
+
+        # Check available memory
+        if rec.sandbox_memory_mb > 0:
+            avail_mem = psutil.virtual_memory().available / (1024 * 1024)
+            if avail_mem < rec.sandbox_memory_mb:
+                self._logger(f"[SYS] [PluginLoader] Insufficient memory for sandbox: {avail_mem:.0f}MB available, {rec.sandbox_memory_mb}MB required")
+                return False
+
+        # Check CPU
+        if rec.cpu_quota_percent > 0:
+            cpu_count = psutil.cpu_count()
+            # Reserve at least 1 core for system
+            max_allowed = (cpu_count - 1) * 100
+            if rec.cpu_quota_percent > max_allowed:
+                self._logger(f"[SYS] [PluginLoader] CPU quota {rec.cpu_quota_percent}% exceeds available {max_allowed}%")
+                return False
+
+        return True
+
+    # Phase 2: Plugin capability inference from code analysis
+    def infer_plugin_capabilities(self, plugin_name: str) -> dict:
+        """Infer required capabilities by analyzing plugin source code.
+
+        Scans for common patterns that require specific capabilities.
+        Returns suggested capabilities list.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"error": "Plugin module not loaded"}
+
+        import inspect
+        import ast
+
+        source = inspect.getsource(module)
+
+        # Patterns that suggest capabilities
+        capability_patterns = {
+            "filesystem.read": [r"open\([^)]*['\"]r['\"]", r"Path\([^)]*\).read_text", r"\.read\(\)"],
+            "filesystem.write": [r"open\([^)]*['\"]w['\"]", r"Path\([^)]*\).write_text", r"\.write\(\)"],
+            "filesystem.delete": [r"os\.remove", r"os\.unlink", r"Path\([^)]*\).unlink", r"shutil\.rmtree"],
+            "filesystem.list": [r"os\.listdir", r"Path\([^)]*\).iterdir", r"os\.scandir"],
+            "network.http": [r"requests\.", r"httpx\.", r"urllib\.request", r"aiohttp\."],
+            "network.websocket": [r"websockets\.", r"websocket\."],
+            "shell.exec": [r"subprocess\.", r"os\.system", r"os\.popen"],
+            "process.spawn": [r"multiprocessing\.", r"threading\.Thread"],
+            "ui.notify": [r"player\.write_log", r"notify\("],
+            "memory.read": [r"session_memory\.get", r"memory\.read"],
+            "memory.write": [r"session_memory\.set", r"memory\.write"],
+            "config.read": [r"config\.read", r"get_plugin_config"],
+            "config.write": [r"config\.write", r"save_plugin_config"],
+        }
+
+        suggested = []
+        for cap, patterns in capability_patterns.items():
+            for pattern in patterns:
+                if pattern in source:
+                    suggested.append(cap)
+                    break
+
+        return {
+            "plugin": plugin_name,
+            "declared": rec.capabilities,
+            "suggested": suggested,
+            "missing_from_declared": [c for c in suggested if c not in rec.capabilities],
+            "extra_in_declared": [c for c in rec.capabilities if c not in suggested],
+        }
+
+    # Phase 2: Plugin dependency graph visualization (DOT format)
+    def export_dependency_graph_dot(self) -> str:
+        """Export plugin dependency graph in DOT format for Graphviz."""
+        graph = self.get_dependency_graph()
+
+        lines = [
+            "digraph plugin_dependencies {",
+            "  rankdir=LR;",
+            "  node [shape=box, style=filled, fillcolor=lightblue];",
+        ]
+
+        for name, info in graph.items():
+            # Node label with version
+            rec = self._plugins.get(name)
+            version = rec.version if rec else "?"
+            lines.append(f'  "{name}" [label="{name}\\nv{version}"];')
+
+        for name, info in graph.items():
+            for dep in info.get("dependencies", []):
+                if dep in graph:
+                    lines.append(f'  "{name}" -> "{dep}";')
+
+        lines.append("}")
+        return "\n".join(lines)
+
+    # Phase 2: Plugin load order optimization
+    def get_optimal_load_order(self) -> list[str]:
+        """Get optimal plugin load order based on dependencies and priority.
+
+        Uses topological sort with priority as tiebreaker.
+        """
+        graph = self.get_dependency_graph()
+
+        # Kahn's algorithm for topological sort
+        in_degree = {name: 0 for name in graph}
+        for name, info in graph.items():
+            for dep in info.get("dependencies", []):
+                if dep in graph:
+                    in_degree[dep] += 1
+
+        # Priority queue (higher priority first)
+        import heapq
+        queue = []
+        for name, degree in in_degree.items():
+            if degree == 0:
+                rec = self._plugins.get(name)
+                priority = -rec.priority if rec else 0  # Negative for max-heap
+                heapq.heappush(queue, (priority, name))
+
+        result = []
+        while queue:
+            _, name = heapq.heappop(queue)
+            result.append(name)
+
+            for dep in graph.get(name, {}).get("dependents", []):
+                in_degree[dep] -= 1
+                if in_degree[dep] == 0:
+                    rec = self._plugins.get(dep)
+                    priority = -rec.priority if rec else 0
+                    heapq.heappush(queue, (priority, dep))
+
+        if len(result) != len(graph):
+            # Circular dependency - fallback to priority sort
+            self._logger("[SYS] [PluginLoader] Circular dependency detected, using priority sort")
+            return self.get_sorted_plugins()
+
+        return result
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
