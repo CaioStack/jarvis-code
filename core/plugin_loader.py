@@ -180,6 +180,10 @@ class PluginRecord:
     _last_success: float = 0
     _last_failure: float = 0
 
+    # Phase 2: Rate limiting
+    rate_limit: int = 0  # max calls per minute (0 = unlimited)
+    _call_timestamps: list = field(default_factory=list, repr=False)  # recent call times
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -237,6 +241,17 @@ class PluginRegistry:
             self._logger(f"[SYS] [PluginLoader] Plugin '{name}' missing capabilities: {missing_caps}")
             return (f"Plugin '{name}' requires ungranted capabilities: {', '.join(missing_caps)}. "
                     f"Grant them in the Plugin Manager to use this plugin.")
+
+        # Phase 2: Rate limiting
+        if rec.rate_limit > 0:
+            import time
+            now = time.time()
+            # Remove timestamps older than 1 minute
+            rec._call_timestamps = [ts for ts in rec._call_timestamps if now - ts < 60]
+            if len(rec._call_timestamps) >= rec.rate_limit:
+                self._logger(f"[SYS] [PluginLoader] Plugin '{name}' rate limited ({rec.rate_limit}/min)")
+                return f"Plugin '{name}' rate limit exceeded ({rec.rate_limit} calls/minute). Please wait."
+            rec._call_timestamps.append(now)
 
         # Phase 2: Debug logging
         if rec.debug:
