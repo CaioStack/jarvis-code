@@ -318,6 +318,12 @@ if __name__ == "__main__":
     def list_for_ui(self) -> list[dict]:
         out = []
         for rec in self._all_records:
+            # Check dependencies for this plugin
+            deps_installed = True
+            missing_deps = []
+            if rec.valid and rec.dependencies:
+                deps_installed, missing_deps = self.check_dependencies(rec.name)
+
             out.append({
                 "name": rec.name,
                 "description": rec.description,
@@ -333,6 +339,8 @@ if __name__ == "__main__":
                 "repository": rec.repository,
                 "keywords": rec.keywords,
                 "dependencies": rec.dependencies,
+                "dependencies_installed": deps_installed,
+                "missing_dependencies": missing_deps,
                 "min_jarvis_version": rec.min_jarvis_version,
                 "capabilities": rec.capabilities,
                 "granted_capabilities": rec.granted_capabilities,
@@ -343,6 +351,36 @@ if __name__ == "__main__":
                 "reload_count": rec._reload_count,
             })
         return out
+
+    # Phase 2: Dependency checking
+    def check_dependencies(self, plugin_name: str) -> tuple[bool, list[str]]:
+        """Check if a plugin's declared dependencies are installed.
+
+        Returns (all_installed, missing_packages).
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False, [f"Plugin '{plugin_name}' not found"]
+        missing = []
+        for dep in rec.dependencies:
+            try:
+                __import__(dep.replace('-', '_'))
+            except ImportError:
+                missing.append(dep)
+        return len(missing) == 0, missing
+
+    def check_all_dependencies(self) -> dict[str, list[str]]:
+        """Check dependencies for all loaded plugins.
+
+        Returns dict of plugin_name -> missing_packages (empty if all installed).
+        """
+        result = {}
+        for name, rec in self._plugins.items():
+            if rec.valid and rec.dependencies:
+                _, missing = self.check_dependencies(name)
+                if missing:
+                    result[name] = missing
+        return result
 
     # Phase 2: Capability management
     def grant_capability(self, plugin_name: str, capability: str) -> bool:
@@ -723,6 +761,11 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
 
     # Phase 2: Load granted capabilities from config
     registry.load_granted_capabilities()
+
+    # Phase 2: Check plugin dependencies
+    missing_deps = registry.check_all_dependencies()
+    for plugin_name, missing in missing_deps.items():
+        logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' missing dependencies: {', '.join(missing)}")
 
     # Phase 2: Start hot-reload watcher
     registry.start_hot_reload(plugins_dir, core_tool_names)
