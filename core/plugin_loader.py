@@ -163,6 +163,13 @@ class PluginRecord:
     _last_modified: float = 0  # for change detection
     _reload_count: int = 0
 
+    # Phase 2: Performance metrics
+    _run_count: int = 0
+    _total_run_time: float = 0.0
+    _last_run_time: float = 0.0
+    _last_error: str = ""
+    _last_run: float = 0  # timestamp
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -221,11 +228,32 @@ class PluginRegistry:
             return (f"Plugin '{name}' requires ungranted capabilities: {', '.join(missing_caps)}. "
                     f"Grant them in the Plugin Manager to use this plugin.")
 
+        # Phase 2: Performance tracking
+        import time
+        start_time = time.perf_counter()
+        rec._last_run = time.time()
+
         try:
             if rec.sandboxed:
-                return self._run_sandboxed(rec, parameters, player, session_memory)
-            return _call_run(rec.run, parameters, player, session_memory) or "Done."
+                result = self._run_sandboxed(rec, parameters, player, session_memory)
+            else:
+                result = _call_run(rec.run, parameters, player, session_memory) or "Done."
+
+            # Track successful run
+            elapsed = time.perf_counter() - start_time
+            rec._run_count += 1
+            rec._total_run_time += elapsed
+            rec._last_run_time = elapsed
+            rec._last_error = ""
+            return result
+
         except Exception as e:
+            # Track failed run
+            elapsed = time.perf_counter() - start_time
+            rec._run_count += 1
+            rec._total_run_time += elapsed
+            rec._last_run_time = elapsed
+            rec._last_error = str(e)
             self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
@@ -381,6 +409,28 @@ if __name__ == "__main__":
                 if missing:
                     result[name] = missing
         return result
+
+    # Phase 2: Performance metrics
+    def get_performance(self, plugin_name: str) -> dict:
+        """Get performance metrics for a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        avg_time = rec._total_run_time / rec._run_count if rec._run_count > 0 else 0
+
+        return {
+            "run_count": rec._run_count,
+            "total_time": rec._total_run_time,
+            "avg_time": avg_time,
+            "last_run_time": rec._last_run_time,
+            "last_error": rec._last_error,
+            "last_run": rec._last_run,
+        }
+
+    def get_all_performance(self) -> dict[str, dict]:
+        """Get performance metrics for all plugins."""
+        return {name: self.get_performance(name) for name in self._plugins}
 
     # Phase 2: Plugin health/status monitoring
     def get_plugin_health(self, plugin_name: str) -> dict:
