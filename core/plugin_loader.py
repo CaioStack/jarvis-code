@@ -2451,6 +2451,392 @@ if __name__ == "__main__":
         except Exception as e:
             return {"error": f"Installation failed: {e}"}
 
+    # Phase 2: Plugin dependency resolution graph
+    def resolve_plugin_dependencies(self, plugin_name: str) -> dict:
+        """Resolve full dependency graph for a plugin (including transitive deps).
+
+        Returns dict with: plugin, dependencies (resolved), missing, conflicts, install_order
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        visited = set()
+        resolved = {}
+        missing = []
+        conflicts = []
+
+        def resolve(name: str, depth: int = 0):
+            if name in visited:
+                return
+            visited.add(name)
+
+            dep_rec = self._plugins.get(name)
+            if not dep_rec:
+                missing.append(name)
+                return
+
+            if dep_rec.dependencies:
+                for dep in dep_rec.dependencies:
+                    resolve(dep, depth + 1)
+
+            resolved[name] = {
+                "version": dep_rec.version,
+                "dependencies": dep_rec.dependencies,
+                "capabilities": dep_rec.capabilities,
+            }
+
+        resolve(plugin_name)
+
+        # Check for version conflicts (simplified)
+        # In a real implementation, you'd check version constraints
+        for name, info in resolved.items():
+            if name != plugin_name and name in self._plugins:
+                other_rec = self._plugins[name]
+                if other_rec.version != info["version"]:
+                    conflicts.append({
+                        "plugin": name,
+                        "expected": info["version"],
+                        "actual": other_rec.version,
+                    })
+
+        # Determine install order (topological sort - simplified)
+        install_order = list(resolved.keys())
+
+        return {
+            "plugin": plugin_name,
+            "dependencies": resolved,
+            "missing": missing,
+            "conflicts": conflicts,
+            "install_order": install_order,
+        }
+
+    def get_dependency_graph(self) -> dict:
+        """Get the full plugin dependency graph."""
+        graph = {}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                graph[name] = {
+                    "dependencies": rec.dependencies,
+                    "dependents": [],  # Will be filled below
+                }
+
+        # Fill in dependents (reverse edges)
+        for name, info in graph.items():
+            for dep in info["dependencies"]:
+                if dep in graph:
+                    graph[dep]["dependents"].append(name)
+
+        return graph
+
+    def check_circular_dependencies(self) -> list[list[str]]:
+        """Check for circular dependencies in the plugin graph.
+
+        Returns list of cycles found (each cycle is a list of plugin names).
+        """
+        graph = self.get_dependency_graph()
+        visited = set()
+        rec_stack = set()
+        cycles = []
+
+        def dfs(node: str, path: list):
+            visited.add(node)
+            rec_stack.add(node)
+            path.append(node)
+
+            for neighbor in graph.get(node, {}).get("dependencies", []):
+                if neighbor not in graph:
+                    continue  # External dependency
+                if neighbor not in visited:
+                    dfs(neighbor, path.copy())
+                elif neighbor in rec_stack:
+                    # Found a cycle
+                    cycle_start = path.index(neighbor)
+                    cycle = path[cycle_start:] + [neighbor]
+                    if cycle not in cycles:
+                        cycles.append(cycle)
+
+            rec_stack.remove(node)
+
+        for node in graph:
+            if node not in visited:
+                dfs(node, [])
+
+        return cycles
+
+    # Phase 2: Plugin performance budgets
+    def set_performance_budget(self, plugin_name: str, budget: dict) -> bool:
+        """Set performance budget for a plugin.
+
+        Budget dict can contain:
+            - max_avg_time_ms: Maximum average execution time in ms
+            - max_p99_time_ms: Maximum 99th percentile time in ms
+            - max_memory_mb: Maximum memory usage in MB
+            - max_cpu_percent: Maximum CPU usage percentage
+            - min_success_rate: Minimum success rate percentage
+
+        Args:
+            plugin_name: Name of the plugin
+            budget: Budget constraints dict
+
+        Returns True if successful.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["performance_budget"] = budget
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Set performance budget for '{plugin_name}': {budget}")
+        return True
+
+    def check_performance_budget(self, plugin_name: str) -> dict:
+        """Check if a plugin is within its performance budget.
+
+        Returns dict with: within_budget, violations, metrics
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        budget = config.get("performance_budget", {})
+
+        if not budget:
+            return {"within_budget": True, "message": "No budget set"}
+
+        violations = []
+        metrics = {}
+
+        # Check average time
+        if rec._run_count > 0:
+            avg_time_ms = (rec._total_run_time / rec._run_count) * 1000
+            metrics["avg_time_ms"] = avg_time_ms
+            if "max_avg_time_ms" in budget and avg_time_ms > budget["max_avg_time_ms"]:
+                violations.append(f"Average time {avg_time_ms:.2f}ms exceeds budget {budget['max_avg_time_ms']}ms")
+
+        # Check success rate
+        if rec._run_count > 0:
+            success_rate = (rec._success_count / rec._run_count) * 100
+            metrics["success_rate"] = success_rate
+            if "min_success_rate" in budget and success_rate < budget["min_success_rate"]:
+                violations.append(f"Success rate {success_rate:.1f}% below budget {budget['min_success_rate']}%")
+
+        # Check memory (if available)
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_mb = process.memory_info().rss / (1024 * 1024)
+            metrics["memory_mb"] = mem_mb
+            if "max_memory_mb" in budget and mem_mb > budget["max_memory_mb"]:
+                violations.append(f"Memory {mem_mb:.1f}MB exceeds budget {budget['max_memory_mb']}MB")
+        except Exception:
+            pass
+
+        # Check CPU (if available)
+        try:
+            import psutil
+            process = psutil.Process()
+            cpu_pct = process.cpu_percent(interval=0.1)
+            metrics["cpu_percent"] = cpu_pct
+            if "max_cpu_percent" in budget and cpu_pct > budget["max_cpu_percent"]:
+                violations.append(f"CPU {cpu_pct:.1f}% exceeds budget {budget['max_cpu_percent']}%")
+        except Exception:
+            pass
+
+        return {
+            "within_budget": len(violations) == 0,
+            "violations": violations,
+            "metrics": metrics,
+        }
+
+    def check_all_performance_budgets(self) -> dict:
+        """Check performance budgets for all plugins."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                from memory.config_manager import get_plugin_config
+                config = get_plugin_config(name)
+                if config.get("performance_budget"):
+                    results[name] = self.check_performance_budget(name)
+        return results
+
+    # Phase 2: Plugin event replay/debugging
+    def record_plugin_event(self, plugin_name: str, event_type: str, data: dict) -> bool:
+        """Record a plugin event for debugging/replay.
+
+        Event types: run_start, run_end, run_error, capability_check, hook_call
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "event_log" not in config:
+            config["event_log"] = []
+
+        import time
+        config["event_log"].append({
+            "timestamp": time.time(),
+            "event_type": event_type,
+            "data": data,
+        })
+
+        # Keep only last 1000 events
+        config["event_log"] = config["event_log"][-1000:]
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def get_plugin_event_log(self, plugin_name: str, event_type: str = None,
+                              limit: int = 100) -> list:
+        """Get recorded plugin events for debugging."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        events = config.get("event_log", [])
+
+        if event_type:
+            events = [e for e in events if e.get("event_type") == event_type]
+
+        return events[-limit:]
+
+    def replay_plugin_events(self, plugin_name: str, player=None, session_memory=None) -> dict:
+        """Replay recorded plugin events for debugging.
+
+        This re-executes the recorded runs with the same parameters.
+        """
+        events = self.get_plugin_event_log(plugin_name, "run_start")
+        if not events:
+            return {"error": "No recorded events to replay"}
+
+        results = []
+        for event in events:
+            data = event.get("data", {})
+            params = data.get("parameters", {})
+            try:
+                result = self.run(plugin_name, params, player, session_memory)
+                results.append({"parameters": params, "result": result, "success": True})
+            except Exception as e:
+                results.append({"parameters": params, "error": str(e), "success": False})
+
+        return {
+            "plugin": plugin_name,
+            "replayed": len(results),
+            "successful": sum(1 for r in results if r["success"]),
+            "failed": sum(1 for r in results if not r["success"]),
+            "results": results,
+        }
+
+    # Phase 2: Plugin A/B testing framework
+    def create_ab_test(self, plugin_name: str, variant_a: dict, variant_b: dict,
+                       traffic_split: float = 0.5) -> bool:
+        """Create an A/B test for a plugin.
+
+        Args:
+            plugin_name: Name of the plugin
+            variant_a: Configuration for variant A (parameters, capabilities, etc.)
+            variant_b: Configuration for variant B
+            traffic_split: Fraction of traffic for variant A (0.0-1.0)
+
+        Returns True if successful.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["ab_test"] = {
+            "enabled": True,
+            "variant_a": variant_a,
+            "variant_b": variant_b,
+            "traffic_split": max(0.0, min(1.0, traffic_split)),
+            "created_at": time.time(),
+            "results": {"a": {"runs": 0, "successes": 0}, "b": {"runs": 0, "successes": 0}},
+        }
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Created A/B test for '{plugin_name}'")
+        return True
+
+    def get_ab_test_variant(self, plugin_name: str) -> str:
+        """Determine which A/B test variant to use for this run."""
+        from memory.config_manager import get_plugin_config
+        import random
+
+        config = get_plugin_config(plugin_name)
+        ab_test = config.get("ab_test", {})
+
+        if not ab_test.get("enabled", False):
+            return "control"
+
+        split = ab_test.get("traffic_split", 0.5)
+        return "a" if random.random() < split else "b"
+
+    def record_ab_test_result(self, plugin_name: str, variant: str, success: bool) -> bool:
+        """Record the result of an A/B test run."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        ab_test = config.get("ab_test", {})
+
+        if not ab_test.get("enabled", False):
+            return False
+
+        if variant in ("a", "b"):
+            ab_test["results"][variant]["runs"] += 1
+            if success:
+                ab_test["results"][variant]["successes"] += 1
+            save_plugin_config(plugin_name, config)
+            return True
+        return False
+
+    def get_ab_test_results(self, plugin_name: str) -> dict:
+        """Get A/B test results with statistical significance."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        ab_test = config.get("ab_test", {})
+
+        if not ab_test.get("enabled", False):
+            return {"error": "No A/B test configured"}
+
+        results = ab_test.get("results", {"a": {"runs": 0, "successes": 0}, "b": {"runs": 0, "successes": 0}})
+
+        # Calculate conversion rates
+        a_runs = results["a"]["runs"]
+        b_runs = results["b"]["runs"]
+        a_success = results["a"]["successes"]
+        b_success = results["b"]["successes"]
+
+        a_rate = a_success / a_runs if a_runs > 0 else 0
+        b_rate = b_success / b_runs if b_runs > 0 else 0
+
+        # Simple significance test (z-test for proportions)
+        import math
+        if a_runs > 0 and b_runs > 0:
+            p_pool = (a_success + b_success) / (a_runs + b_runs)
+            se = math.sqrt(p_pool * (1 - p_pool) * (1/a_runs + 1/b_runs))
+            if se > 0:
+                z = (a_rate - b_rate) / se
+                # Two-tailed p-value approximation
+                p_value = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+            else:
+                p_value = 1.0
+        else:
+            p_value = 1.0
+
+        return {
+            "variant_a": {"runs": a_runs, "successes": a_success, "rate": a_rate},
+            "variant_b": {"runs": b_runs, "successes": b_success, "rate": b_rate},
+            "difference": a_rate - b_rate,
+            "p_value": p_value,
+            "significant": p_value < 0.05,
+            "winner": "a" if a_rate > b_rate else "b" if b_rate > a_rate else "tie",
+        }
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
