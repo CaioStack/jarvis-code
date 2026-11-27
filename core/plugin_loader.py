@@ -752,6 +752,115 @@ if __name__ == "__main__":
         self._logger(f"[SYS] [PluginLoader] Imported config for '{plugin_name}'")
         return True
 
+    # Phase 2: Plugin security scanner
+    def scan_plugin_security(self, plugin_name: str) -> dict:
+        """Scan a plugin for potentially dangerous code patterns.
+
+        Returns dict with: safe, issues (list of findings), risk_level
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.valid:
+            return {"error": f"Plugin '{plugin_name}' not found or invalid"}
+
+        import inspect
+        import ast
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"error": f"Plugin module not loaded"}
+
+        source = inspect.getsource(module)
+
+        # Dangerous patterns to check
+        dangerous_patterns = [
+            ("eval", "Use of eval() - can execute arbitrary code"),
+            ("exec", "Use of exec() - can execute arbitrary code"),
+            ("compile", "Use of compile() - can execute arbitrary code"),
+            ("__import__", "Dynamic imports - can load arbitrary modules"),
+            ("subprocess", "Subprocess execution - can run system commands"),
+            ("os.system", "os.system() - can run shell commands"),
+            ("os.popen", "os.popen() - can run shell commands"),
+            ("ctypes", "ctypes - can call C libraries"),
+            ("pickle", "pickle - can execute code on deserialization"),
+            ("marshal", "marshal - can execute code on deserialization"),
+            ("importlib", "importlib - dynamic module loading"),
+            ("open", "File operations - check for path traversal"),
+        ]
+
+        issues = []
+        try:
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        func_name = node.func.id
+                        for pattern, desc in dangerous_patterns:
+                            if func_name == pattern:
+                                issues.append({
+                                    "type": "dangerous_call",
+                                    "pattern": pattern,
+                                    "description": desc,
+                                    "line": node.lineno,
+                                })
+                    elif isinstance(node.func, ast.Attribute):
+                        attr_name = node.func.attr
+                        for pattern, desc in dangerous_patterns:
+                            if attr_name == pattern:
+                                issues.append({
+                                    "type": "dangerous_call",
+                                    "pattern": pattern,
+                                    "description": desc,
+                                    "line": node.lineno,
+                                })
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        for pattern, desc in dangerous_patterns:
+                            if pattern in alias.name:
+                                issues.append({
+                                    "type": "dangerous_import",
+                                    "pattern": pattern,
+                                    "description": f"Import of {alias.name}: {desc}",
+                                    "line": node.lineno,
+                                })
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        for pattern, desc in dangerous_patterns:
+                            if pattern in node.module:
+                                issues.append({
+                                    "type": "dangerous_import",
+                                    "pattern": pattern,
+                                    "description": f"Import from {node.module}: {desc}",
+                                    "line": node.lineno,
+                                })
+        except Exception as e:
+            issues.append({
+                "type": "parse_error",
+                "pattern": "N/A",
+                "description": f"Failed to parse source: {e}",
+                "line": 0,
+            })
+
+        # Determine risk level
+        if not issues:
+            risk_level = "safe"
+        elif any(i["type"] == "parse_error" for i in issues):
+            risk_level = "unknown"
+        elif any(i["pattern"] in ("eval", "exec", "compile", "subprocess", "os.system", "os.popen", "ctypes") for i in issues):
+            risk_level = "high"
+        elif any(i["pattern"] in ("__import__", "importlib", "pickle", "marshal") for i in issues):
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+        return {
+            "safe": len(issues) == 0,
+            "risk_level": risk_level,
+            "issues": issues,
+            "scanned_at": time.time(),
+        }
+
     # Phase 2: Hot-reload via filesystem watchdog
     def start_hot_reload(self, plugins_dir: Path, core_tool_names: set[str]) -> bool:
         """Start watching the plugins directory for changes.
