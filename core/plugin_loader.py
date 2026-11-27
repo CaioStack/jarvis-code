@@ -1993,6 +1993,464 @@ if __name__ == "__main__":
             for i, s in enumerate(snapshots)
         ]
 
+    # Phase 2: Plugin trust levels
+    TRUST_LEVELS = {
+        "official": 3,      # Signed by core team, full access
+        "community": 2,     # Community verified, limited capabilities
+        "untrusted": 1,     # No verification, minimal capabilities
+        "blocked": 0,       # Explicitly blocked, cannot run
+    }
+
+    def set_plugin_trust_level(self, plugin_name: str, trust_level: str) -> bool:
+        """Set a plugin's trust level.
+
+        Trust levels (highest to lowest):
+            - official: Core team verified, full capabilities allowed
+            - community: Community verified, restricted capabilities
+            - untrusted: No verification, minimal capabilities only
+            - blocked: Explicitly blocked, cannot execute
+
+        Args:
+            plugin_name: Name of the plugin
+            trust_level: One of "official", "community", "untrusted", "blocked"
+
+        Returns True if successful.
+        """
+        if trust_level not in self.TRUST_LEVELS:
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        # Store trust level in config
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        config["trust_level"] = trust_level
+        save_plugin_config(plugin_name, config)
+
+        # Auto-apply capability restrictions based on trust level
+        if trust_level == "blocked":
+            # Disable plugin entirely
+            from memory.config_manager import save_plugin_enabled
+            save_plugin_enabled(plugin_name, False)
+        elif trust_level == "untrusted":
+            # Only allow minimal capabilities
+            self.apply_capability_preset(plugin_name, "minimal")
+        elif trust_level == "community":
+            # Allow standard capabilities but not system/media
+            allowed = (self.get_capability_presets()["minimal"] +
+                      self.get_capability_presets()["filesystem"] +
+                      self.get_capability_presets()["network"] +
+                      self.get_capability_presets()["data"])
+            rec.granted_capabilities = allowed
+            self._save_capabilities()
+        elif trust_level == "official":
+            # Allow all declared capabilities (if granted)
+            pass  # User still needs to grant individual capabilities
+
+        self._logger(f"[SYS] [PluginLoader] Set trust level for '{plugin_name}': {trust_level}")
+        return True
+
+    def get_plugin_trust_level(self, plugin_name: str) -> str:
+        """Get a plugin's trust level."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        return config.get("trust_level", "untrusted")
+
+    def get_trust_level_info(self, plugin_name: str) -> dict:
+        """Get detailed trust level information for a plugin."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        trust_level = self.get_plugin_trust_level(plugin_name)
+        level_value = self.TRUST_LEVELS.get(trust_level, 1)
+
+        return {
+            "plugin": plugin_name,
+            "trust_level": trust_level,
+            "level_value": level_value,
+            "verified": rec.verified,
+            "signer": rec.signer,
+            "signature": rec.signature[:16] + "..." if rec.signature else None,
+            "capabilities_allowed": self._get_allowed_capabilities_for_trust(trust_level),
+            "sandbox_required": trust_level in ("untrusted", "community"),
+        }
+
+    def _get_allowed_capabilities_for_trust(self, trust_level: str) -> list[str]:
+        """Get allowed capabilities for a trust level."""
+        if trust_level == "blocked":
+            return []
+        elif trust_level == "untrusted":
+            return self.get_capability_presets()["minimal"]
+        elif trust_level == "community":
+            return (self.get_capability_presets()["minimal"] +
+                    self.get_capability_presets()["filesystem"] +
+                    self.get_capability_presets()["network"] +
+                    self.get_capability_presets()["data"])
+        elif trust_level == "official":
+            return list(_VALID_CAPABILITIES)
+        return []
+
+    # Phase 2: RSA cryptographic signing (alternative to Ed25519)
+    def sign_plugin_rsa(self, plugin_name: str, private_key_pem: str, signer: str) -> bool:
+        """Sign a plugin using RSA (PKCS#1 v1.5 with SHA-256).
+
+        Args:
+            plugin_name: Name of the plugin to sign
+            private_key_pem: PEM-encoded RSA private key
+            signer: Identity of the signer
+
+        Returns True if signing succeeded.
+        """
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        except ImportError:
+            self._logger("[SYS] [PluginLoader] cryptography package not available for RSA signing")
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return False
+
+        import inspect
+        import hashlib
+        source = inspect.getsource(module)
+        source_hash = hashlib.sha256(source.encode()).digest()
+
+        # Load private key
+        try:
+            private_key = serialization.load_pem_private_key(
+                private_key_pem.encode(),
+                password=None,
+            )
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] Failed to load RSA private key: {e}")
+            return False
+
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            self._logger("[SYS] [PluginLoader] Private key is not RSA")
+            return False
+
+        # Sign with RSA-PKCS1v15
+        signature = private_key.sign(
+            source_hash,
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+
+        rec.signature = signature.hex()
+        rec.signer = signer
+        rec.verified = True
+
+        self._logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' signed with RSA by '{signer}'")
+        return True
+
+    def verify_plugin_rsa(self, plugin_name: str, public_key_pem: str) -> dict:
+        """Verify a plugin's RSA signature.
+
+        Args:
+            plugin_name: Name of the plugin to verify
+            public_key_pem: PEM-encoded RSA public key
+
+        Returns dict with verification result.
+        """
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+            from cryptography.exceptions import InvalidSignature
+        except ImportError:
+            return {"verified": False, "error": "cryptography package not available"}
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"verified": False, "error": f"Plugin '{plugin_name}' not found"}
+
+        if not rec.signature:
+            return {"verified": False, "error": "Plugin not signed"}
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"verified": False, "error": "Plugin module not loaded"}
+
+        import inspect
+        import hashlib
+        source = inspect.getsource(module)
+        source_hash = hashlib.sha256(source.encode()).digest()
+
+        # Load public key
+        try:
+            public_key = serialization.load_pem_public_key(public_key_pem.encode())
+        except Exception as e:
+            return {"verified": False, "error": f"Failed to load public key: {e}"}
+
+        if not isinstance(public_key, rsa.RSAPublicKey):
+            return {"verified": False, "error": "Public key is not RSA"}
+
+        # Verify RSA-PKCS1v15 signature
+        try:
+            public_key.verify(
+                bytes.fromhex(rec.signature),
+                source_hash,
+                padding.PKCS1v15(),
+                hashes.SHA256(),
+            )
+            verified = True
+        except InvalidSignature:
+            verified = False
+        except Exception as e:
+            return {"verified": False, "error": f"Verification error: {e}"}
+
+        rec.verified = verified
+
+        return {
+            "verified": verified,
+            "signer": rec.signer,
+            "signature": rec.signature[:16] + "...",
+            "verified_at": time.time(),
+        }
+
+    # Phase 2: Enhanced sandbox with cgroups support (Linux)
+    def _run_sandboxed_cgroups(self, rec: PluginRecord, parameters: dict, player, session_memory) -> str:
+        """Execute plugin in sandboxed subprocess with cgroups v2 limits (Linux only).
+
+        This provides true memory and CPU isolation using Linux cgroups.
+        Falls back to regular sandbox if cgroups not available.
+        """
+        import subprocess
+        import tempfile
+        import os
+        import sys
+
+        # Check if cgroups v2 is available
+        cgroup_mount = Path("/sys/fs/cgroup")
+        if not cgroup_mount.exists():
+            self._logger("[SYS] [PluginLoader] cgroups v2 not available, falling back to regular sandbox")
+            return self._run_sandboxed(rec, parameters, player, session_memory)
+
+        try:
+            # Create a unique cgroup for this plugin run
+            import uuid
+            cgroup_name = f"jarvis_plugin_{rec.name}_{uuid.uuid4().hex[:8]}"
+            cgroup_path = cgroup_mount / cgroup_name
+
+            # Create cgroup directory
+            cgroup_path.mkdir(parents=True, exist_ok=True)
+
+            # Set memory limit
+            if rec.sandbox_memory_mb > 0:
+                memory_max = rec.sandbox_memory_mb * 1024 * 1024
+                (cgroup_path / "memory.max").write_text(str(memory_max))
+
+            # Set CPU limit (quota/period)
+            if rec.cpu_quota_percent > 0:
+                cpu_period = 100000  # 100ms
+                cpu_quota = int(cpu_period * rec.cpu_quota_percent / 100)
+                (cgroup_path / "cpu.max").write_text(f"{cpu_quota} {cpu_period}")
+
+            # Prepare plugin code for subprocess execution
+            plugin_code = f'''
+import sys, json, traceback
+sys.path.insert(0, {json.dumps(str(Path(__file__).resolve().parent.parent))})
+
+from plugins.{rec.name} import run as plugin_run
+
+if __name__ == "__main__":
+    params = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {{}}
+    try:
+        result = plugin_run(params)
+        print(json.dumps({{"ok": True, "result": str(result)}}))
+    except Exception as e:
+        print(json.dumps({{"ok": False, "error": str(e), "traceback": traceback.format_exc()}}))
+        sys.exit(1)
+'''
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(plugin_code)
+                script_path = f.name
+
+            try:
+                # Run with cgroup
+                cmd = [sys.executable, script_path, json.dumps(parameters)]
+
+                # Add current process to cgroup (requires root or delegated cgroup)
+                # Note: This typically requires running as root or having
+                # the cgroup delegated to the user. For production, use
+                # a dedicated sandbox user with cgroup delegation.
+                try:
+                    # Try to add ourselves to the cgroup
+                    with open(cgroup_path / "cgroup.procs", "w") as f:
+                        f.write(str(os.getpid()))
+                except PermissionError:
+                    self._logger("[SYS] [PluginLoader] Cannot join cgroup (permission denied), running without cgroup limits")
+                    return self._run_sandboxed(rec, parameters, player, session_memory)
+
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=rec.sandbox_timeout,
+                )
+
+                if proc.returncode != 0:
+                    try:
+                        result = json.loads(proc.stdout.strip())
+                        return f"Sandboxed plugin failed: {result.get('error', 'Unknown error')}"
+                    except Exception:
+                        return f"Sandboxed plugin failed (exit {proc.returncode}): {proc.stderr[:200]}"
+
+                result = json.loads(proc.stdout.strip())
+                return result.get("result", "Done.")
+
+            except subprocess.TimeoutExpired:
+                return f"Plugin '{rec.name}' timed out after {rec.sandbox_timeout}s (sandbox limit)."
+            except Exception as e:
+                return f"Sandbox execution error: {e}"
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(script_path)
+                except Exception:
+                    pass
+                # Clean up cgroup
+                try:
+                    import shutil
+                    shutil.rmtree(cgroup_path, ignore_errors=True)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] cgroups sandbox error: {e}")
+            return self._run_sandboxed(rec, parameters, player, session_memory)
+
+    # Phase 2: Plugin marketplace/discovery API
+    def search_plugins_online(self, query: str, limit: int = 10) -> dict:
+        """Search for plugins in the online marketplace (GitHub).
+
+        This is a placeholder for future marketplace integration.
+        Currently searches GitHub repositories with 'jarvis-code-plugin' topic.
+
+        Args:
+            query: Search query
+            limit: Maximum results
+
+        Returns dict with search results.
+        """
+        try:
+            import httpx
+        except ImportError:
+            return {"error": "httpx not available for marketplace search"}
+
+        try:
+            # Search GitHub for repositories with jarvis-code-plugin topic
+            response = httpx.get(
+                "https://api.github.com/search/repositories",
+                params={
+                    "q": f"{query} topic:jarvis-code-plugin",
+                    "sort": "stars",
+                    "order": "desc",
+                    "per_page": limit,
+                },
+                timeout=15,
+            )
+
+            if response.status_code != 200:
+                return {"error": f"GitHub API error: {response.status_code}"}
+
+            data = response.json()
+            plugins = []
+
+            for repo in data.get("items", []):
+                plugins.append({
+                    "name": repo["name"],
+                    "description": repo.get("description", ""),
+                    "repository": repo["html_url"],
+                    "stars": repo["stargazers_count"],
+                    "language": repo.get("language"),
+                    "updated_at": repo["updated_at"],
+                    "owner": repo["owner"]["login"],
+                })
+
+            return {
+                "query": query,
+                "total_count": data.get("total_count", 0),
+                "plugins": plugins,
+            }
+        except Exception as e:
+            return {"error": f"Marketplace search failed: {e}"}
+
+    def install_plugin_from_url(self, plugin_url: str, target_name: str = None) -> dict:
+        """Install a plugin from a URL (GitHub raw file, direct download).
+
+        Args:
+            plugin_url: URL to the plugin .py file
+            target_name: Optional name to save as (defaults to filename)
+
+        Returns dict with installation result.
+        """
+        import httpx
+        import tempfile
+        import shutil
+
+        try:
+            # Download plugin
+            response = httpx.get(plugin_url, timeout=30)
+            if response.status_code != 200:
+                return {"error": f"Download failed: {response.status_code}"}
+
+            content = response.text
+
+            # Validate it's a Python file with PLUGIN dict
+            if "PLUGIN" not in content or "def run" not in content:
+                return {"error": "Invalid plugin file: missing PLUGIN dict or run function"}
+
+            # Determine target filename
+            if target_name:
+                filename = target_name if target_name.endswith(".py") else target_name + ".py"
+            else:
+                filename = plugin_url.split("/")[-1]
+                if not filename.endswith(".py"):
+                    filename += ".py"
+
+            # Save to plugins directory
+            plugins_dir = Path("plugins")
+            plugins_dir.mkdir(exist_ok=True)
+            target_path = plugins_dir / filename
+
+            # Check for collision
+            if target_path.exists():
+                return {"error": f"Plugin '{filename}' already exists"}
+
+            with open(target_path, "w") as f:
+                f.write(content)
+
+            self._logger(f"[SYS] [PluginLoader] Installed plugin from URL: {filename}")
+
+            # Trigger hot-reload to pick up new plugin
+            if hasattr(self, '_reload_plugin'):
+                # Note: This would need core_tool_names from the registry
+                # For now, just return success
+                pass
+
+            return {
+                "success": True,
+                "plugin_file": filename,
+                "message": f"Plugin installed as '{filename}'. Restart or trigger hot-reload to load.",
+            }
+
+        except Exception as e:
+            return {"error": f"Installation failed: {e}"}
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
