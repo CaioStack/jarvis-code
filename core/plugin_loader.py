@@ -432,6 +432,47 @@ if __name__ == "__main__":
         """Get performance metrics for all plugins."""
         return {name: self.get_performance(name) for name in self._plugins}
 
+    # Phase 2: Version compatibility checking
+    def check_version_compatibility(self, plugin_name: str, current_version: str = "1.2.0") -> dict:
+        """Check if a plugin's min_jarvis_version is compatible with current version.
+
+        Returns dict with: compatible, min_version, current_version, reason
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"compatible": False, "error": f"Plugin '{plugin_name}' not found"}
+
+        min_version = rec.min_jarvis_version or "1.0.0"
+
+        def parse_version(v: str) -> tuple:
+            try:
+                parts = v.split('.')
+                return tuple(int(p) for p in parts[:3])
+            except Exception:
+                return (0, 0, 0)
+
+        min_tuple = parse_version(min_version)
+        current_tuple = parse_version(current_version)
+
+        compatible = current_tuple >= min_tuple
+        reason = ""
+        if not compatible:
+            reason = f"Requires Jarvis {min_version}, current is {current_version}"
+
+        return {
+            "compatible": compatible,
+            "min_version": min_version,
+            "current_version": current_version,
+            "reason": reason,
+        }
+
+    def check_all_compatibility(self, current_version: str = "1.2.0") -> dict[str, dict]:
+        """Check version compatibility for all plugins."""
+        return {
+            name: self.check_version_compatibility(name, current_version)
+            for name in self._plugins
+        }
+
     # Phase 2: Plugin health/status monitoring
     def get_plugin_health(self, plugin_name: str) -> dict:
         """Get health status for a plugin.
