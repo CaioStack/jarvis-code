@@ -1268,7 +1268,7 @@ if __name__ == "__main__":
             del self._plugins[name]
             self._logger(f"[SYS] [PluginLoader] Plugin unloaded: {name}")
 
-    # Phase 2: Plugin signing/verification
+    # Phase 2: Plugin signing/verification (HMAC-based, for backward compatibility)
     def verify_plugin_signature(self, plugin_name: str, public_key: str = None) -> dict:
         """Verify a plugin's cryptographic signature.
 
@@ -1352,6 +1352,293 @@ if __name__ == "__main__":
 
         self._logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' signed by '{signer}'")
         return True
+
+    # Phase 2: Ed25519 cryptographic signing (production-ready)
+    def sign_plugin_ed25519(self, plugin_name: str, private_key_bytes: bytes, signer: str) -> bool:
+        """Sign a plugin using Ed25519 (production-ready cryptographic signing).
+
+        Args:
+            plugin_name: Name of the plugin to sign
+            private_key_bytes: 32-byte Ed25519 private key
+            signer: Identity of the signer
+
+        Returns True if signing succeeded.
+        """
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ed25519
+            from cryptography.hazmat.primitives import serialization
+        except ImportError:
+            self._logger("[SYS] [PluginLoader] cryptography package not available for Ed25519 signing")
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return False
+
+        import inspect
+        source = inspect.getsource(module)
+        source_hash = hashlib.sha256(source.encode()).digest()
+
+        # Sign with Ed25519
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+        signature = private_key.sign(source_hash)
+
+        rec.signature = signature.hex()
+        rec.signer = signer
+        rec.verified = True
+
+        self._logger(f"[SYS] [PluginLoader] Plugin '{plugin_name}' signed with Ed25519 by '{signer}'")
+        return True
+
+    def verify_plugin_ed25519(self, plugin_name: str, public_key_bytes: bytes) -> dict:
+        """Verify a plugin's Ed25519 signature.
+
+        Args:
+            plugin_name: Name of the plugin to verify
+            public_key_bytes: 32-byte Ed25519 public key
+
+        Returns dict with verification result.
+        """
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ed25519
+            from cryptography.exceptions import InvalidSignature
+        except ImportError:
+            return {"verified": False, "error": "cryptography package not available"}
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"verified": False, "error": f"Plugin '{plugin_name}' not found"}
+
+        if not rec.signature:
+            return {"verified": False, "error": "Plugin not signed"}
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return {"verified": False, "error": "Plugin module not loaded"}
+
+        import inspect
+        import hashlib
+        source = inspect.getsource(module)
+        source_hash = hashlib.sha256(source.encode()).digest()
+
+        # Verify Ed25519 signature
+        try:
+            public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            public_key.verify(bytes.fromhex(rec.signature), source_hash)
+            verified = True
+        except InvalidSignature:
+            verified = False
+        except Exception as e:
+            return {"verified": False, "error": f"Verification error: {e}"}
+
+        rec.verified = verified
+
+        return {
+            "verified": verified,
+            "signer": rec.signer,
+            "signature": rec.signature[:16] + "...",
+            "verified_at": time.time(),
+        }
+
+    # Phase 2: Plugin update checking
+    def check_plugin_updates(self, plugin_name: str, repository_url: str = None) -> dict:
+        """Check if a plugin has updates available from its repository.
+
+        Args:
+            plugin_name: Name of the plugin to check
+            repository_url: Optional repository URL (uses plugin's repository if not provided)
+
+        Returns dict with: has_update, current_version, latest_version, changelog_url
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        repo = repository_url or rec.repository
+        if not repo:
+            return {"error": "No repository URL configured for this plugin"}
+
+        # For GitHub repositories, check latest release
+        if "github.com" in repo:
+            return self._check_github_updates(plugin_name, repo, rec.version)
+
+        return {"error": f"Unsupported repository type: {repo}"}
+
+    def _check_github_updates(self, plugin_name: str, repo_url: str, current_version: str) -> dict:
+        """Check GitHub releases for plugin updates."""
+        import re
+        try:
+            import httpx
+        except ImportError:
+            return {"error": "httpx not available for update checking"}
+
+        # Extract owner/repo from URL
+        match = re.search(r"github\.com[:/]([^/]+)/([^/\.]+)", repo_url)
+        if not match:
+            return {"error": "Invalid GitHub repository URL"}
+
+        owner, repo = match.groups()
+        repo = repo.replace(".git", "")
+
+        try:
+            response = httpx.get(f"https://api.github.com/repos/{owner}/{repo}/releases/latest", timeout=10)
+            if response.status_code != 200:
+                return {"error": f"GitHub API error: {response.status_code}"}
+
+            release = response.json()
+            latest_version = release.get("tag_name", "").lstrip("v")
+
+            # Simple version comparison
+            def parse_version(v):
+                parts = v.split('.')
+                return tuple(int(p) for p in parts[:3])
+
+            current = parse_version(current_version)
+            latest = parse_version(latest_version)
+
+            has_update = latest > current
+
+            return {
+                "has_update": has_update,
+                "current_version": current_version,
+                "latest_version": latest_version,
+                "release_url": release.get("html_url"),
+                "changelog": release.get("body", "")[:500],
+                "published_at": release.get("published_at"),
+            }
+        except Exception as e:
+            return {"error": f"Update check failed: {e}"}
+
+    def check_all_plugin_updates(self) -> dict:
+        """Check all plugins for updates."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.repository:
+                results[name] = self.check_plugin_updates(name)
+            else:
+                results[name] = {"skipped": True, "reason": "No repository URL"}
+        return results
+
+    # Phase 2: Auto-install plugin dependencies
+    def install_plugin_dependencies(self, plugin_name: str) -> dict:
+        """Attempt to install missing pip dependencies for a plugin.
+
+        Returns dict with: success, installed, failed, message
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        if not rec.dependencies:
+            return {"success": True, "message": "No dependencies declared"}
+
+        import subprocess
+        import sys
+
+        missing = []
+        for dep in rec.dependencies:
+            try:
+                __import__(dep.replace('-', '_'))
+            except ImportError:
+                missing.append(dep)
+
+        if not missing:
+            return {"success": True, "message": "All dependencies already installed"}
+
+        installed = []
+        failed = []
+
+        for dep in missing:
+            try:
+                self._logger(f"[SYS] [PluginLoader] Installing dependency '{dep}' for '{plugin_name}'")
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", dep],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if result.returncode == 0:
+                    installed.append(dep)
+                else:
+                    failed.append(dep)
+                    self._logger(f"[SYS] [PluginLoader] Failed to install '{dep}': {result.stderr[:200]}")
+            except subprocess.TimeoutExpired:
+                failed.append(dep)
+                self._logger(f"[SYS] [PluginLoader] Timeout installing '{dep}'")
+            except Exception as e:
+                failed.append(dep)
+                self._logger(f"[SYS] [PluginLoader] Error installing '{dep}': {e}")
+
+        success = len(failed) == 0
+        return {
+            "success": success,
+            "installed": installed,
+            "failed": failed,
+            "message": f"Installed {len(installed)} of {len(missing)} missing dependencies"
+        }
+
+    def install_all_missing_dependencies(self) -> dict:
+        """Install missing dependencies for all plugins."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.dependencies:
+                results[name] = self.install_plugin_dependencies(name)
+        return results
+
+    # Phase 2: Plugin permission presets
+    def apply_capability_preset(self, plugin_name: str, preset: str) -> bool:
+        """Apply a predefined capability preset to a plugin.
+
+        Presets:
+            - "minimal": ui.notify only
+            - "filesystem": filesystem.read, filesystem.write, filesystem.list
+            - "network": network.http, network.websocket
+            - "system": shell.exec, process.spawn
+            - "media": audio.record, audio.play, video.record
+            - "data": memory.read, memory.write, config.read, config.write
+            - "full": all capabilities
+        """
+        presets = {
+            "minimal": ["ui.notify"],
+            "filesystem": ["filesystem.read", "filesystem.write", "filesystem.list"],
+            "network": ["network.http", "network.websocket"],
+            "system": ["shell.exec", "process.spawn"],
+            "media": ["audio.record", "audio.play", "video.record"],
+            "data": ["memory.read", "memory.write", "config.read", "config.write"],
+            "full": list(_VALID_CAPABILITIES),
+        }
+
+        if preset not in presets:
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        rec.granted_capabilities = presets[preset]
+        self._save_capabilities()
+        self._logger(f"[SYS] [PluginLoader] Applied '{preset}' preset to '{plugin_name}'")
+        return True
+
+    def get_capability_presets(self) -> dict:
+        """Get available capability presets."""
+        return {
+            "minimal": ["ui.notify"],
+            "filesystem": ["filesystem.read", "filesystem.write", "filesystem.list"],
+            "network": ["network.http", "network.websocket"],
+            "system": ["shell.exec", "process.spawn"],
+            "media": ["audio.record", "audio.play", "video.record"],
+            "data": ["memory.read", "memory.write", "config.read", "config.write"],
+            "full": list(_VALID_CAPABILITIES),
+        }
 
 
 def _call_run(run_fn, parameters, player, session_memory):
