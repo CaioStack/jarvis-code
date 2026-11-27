@@ -207,6 +207,18 @@ class PluginRegistry:
         # which keeps every existing single-sink caller working unchanged.
         self._notify = notify or (lambda _msg: None)
 
+        # Phase 2: Global event hooks
+        self._hooks: dict[str, list[Callable]] = {
+            "plugin_loaded": [],
+            "plugin_unloaded": [],
+            "plugin_enabled": [],
+            "plugin_disabled": [],
+            "plugin_reloaded": [],
+            "plugin_error": [],
+            "before_run": [],
+            "after_run": [],
+        }
+
     # -- called by main.py at LiveConnectConfig build time --
     def get_tool_declarations(self) -> list[dict]:
         decls = []
@@ -236,6 +248,34 @@ class PluginRegistry:
         """How this plugin's result should re-enter the conversation, if it said."""
         rec = self._plugins.get(name)
         return rec.scheduling if rec else None
+
+    # Phase 2: Global event hooks
+    def register_hook(self, event: str, callback: Callable) -> bool:
+        """Register a global event hook.
+
+        Events: plugin_loaded, plugin_unloaded, plugin_enabled, plugin_disabled,
+                plugin_reloaded, plugin_error, before_run, after_run
+        """
+        if event in self._hooks:
+            self._hooks[event].append(callback)
+            return True
+        return False
+
+    def unregister_hook(self, event: str, callback: Callable) -> bool:
+        """Unregister a global event hook."""
+        if event in self._hooks and callback in self._hooks[event]:
+            self._hooks[event].remove(callback)
+            return True
+        return False
+
+    def _trigger_hook(self, event: str, *args, **kwargs) -> None:
+        """Trigger all callbacks for an event."""
+        if event in self._hooks:
+            for callback in self._hooks[event]:
+                try:
+                    callback(*args, **kwargs)
+                except Exception as e:
+                    self._logger(f"[SYS] [PluginLoader] Hook '{event}' failed: {e}")
 
     # -- called by main.py from _execute_tool's else branch --
     def run(self, name: str, parameters: dict, player=None, session_memory=None) -> str:
@@ -277,6 +317,9 @@ class PluginRegistry:
         if rec._first_run == 0:
             rec._first_run = now
 
+        # Phase 2: Trigger before_run hook
+        self._trigger_hook("before_run", name, parameters)
+
         try:
             if rec.sandboxed:
                 result = self._run_sandboxed(rec, parameters, player, session_memory)
@@ -292,6 +335,9 @@ class PluginRegistry:
             rec._success_count += 1
             rec._last_success = now
 
+            # Phase 2: Trigger after_run hook
+            self._trigger_hook("after_run", name, parameters, result, elapsed)
+
             # Phase 2: Debug logging for result
             if rec.debug:
                 self._logger(f"[SYS] [PluginLoader] DEBUG: '{name}' completed in {elapsed*1000:.2f}ms: {result[:100]}")
@@ -306,6 +352,10 @@ class PluginRegistry:
             rec._last_error = str(e)
             rec._failure_count += 1
             rec._last_failure = now
+
+            # Phase 2: Trigger plugin_error hook
+            self._trigger_hook("plugin_error", name, e)
+
             self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
             self._notify(f"Plugin '{name}' failed — see the console for details.")
             traceback.print_exc()
