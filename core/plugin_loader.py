@@ -382,6 +382,53 @@ if __name__ == "__main__":
                     result[name] = missing
         return result
 
+    # Phase 2: Plugin health/status monitoring
+    def get_plugin_health(self, plugin_name: str) -> dict:
+        """Get health status for a plugin.
+
+        Returns dict with: status, capabilities_ok, dependencies_ok, last_error, run_count, last_run
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"status": "not_found", "error": f"Plugin '{plugin_name}' not found"}
+
+        if not rec.valid:
+            return {"status": "invalid", "error": rec.error}
+
+        # Check capabilities
+        caps_ok = True
+        missing_caps = [c for c in rec.capabilities if c not in rec.granted_capabilities]
+        if missing_caps:
+            caps_ok = False
+
+        # Check dependencies
+        deps_ok = True
+        missing_deps = []
+        if rec.dependencies:
+            deps_ok, missing_deps = self.check_dependencies(plugin_name)
+
+        # Determine overall status
+        if not caps_ok or not deps_ok:
+            status = "degraded"
+        else:
+            status = "healthy"
+
+        return {
+            "status": status,
+            "capabilities_ok": caps_ok,
+            "missing_capabilities": missing_caps,
+            "dependencies_ok": deps_ok,
+            "missing_dependencies": missing_deps,
+            "version": rec.version,
+            "sandboxed": rec.sandboxed,
+            "reload_count": rec._reload_count,
+            "last_modified": rec._last_modified,
+        }
+
+    def get_all_health(self) -> dict[str, dict]:
+        """Get health status for all plugins."""
+        return {name: self.get_plugin_health(name) for name in self._plugins}
+
     # Phase 2: Capability management
     def grant_capability(self, plugin_name: str, capability: str) -> bool:
         """Grant a capability to a plugin. Returns True if successful."""
