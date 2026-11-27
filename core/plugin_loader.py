@@ -429,6 +429,55 @@ if __name__ == "__main__":
         """Get health status for all plugins."""
         return {name: self.get_plugin_health(name) for name in self._plugins}
 
+    # Phase 2: Plugin lifecycle hooks
+    def _call_lifecycle_hook(self, rec: PluginRecord, hook_name: str) -> bool:
+        """Call a lifecycle hook on a plugin if it exists.
+
+        Returns True if hook was called, False if not defined or error.
+        Hooks: on_load, on_unload, on_enable, on_disable, on_reload
+        """
+        if not rec.valid or not rec.run:
+            return False
+
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if not module:
+            return False
+
+        hook_fn = getattr(module, hook_name, None)
+        if not callable(hook_fn):
+            return False
+
+        try:
+            hook_fn()
+            return True
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] Plugin '{rec.name}' {hook_name} hook failed: {e}")
+            return False
+
+    def enable_plugin(self, plugin_name: str) -> bool:
+        """Enable a plugin and call on_enable hook."""
+        from memory.config_manager import save_plugin_enabled
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.valid:
+            return False
+        save_plugin_enabled(plugin_name, True)
+        self._call_lifecycle_hook(rec, "on_enable")
+        self._notify(f"Plugin '{plugin_name}' enabled")
+        return True
+
+    def disable_plugin(self, plugin_name: str) -> bool:
+        """Disable a plugin and call on_disable hook."""
+        from memory.config_manager import save_plugin_enabled
+        rec = self._plugins.get(plugin_name)
+        if not rec or not rec.valid:
+            return False
+        save_plugin_enabled(plugin_name, False)
+        self._call_lifecycle_hook(rec, "on_disable")
+        self._notify(f"Plugin '{plugin_name}' disabled")
+        return True
+
     # Phase 2: Capability management
     def grant_capability(self, plugin_name: str, capability: str) -> bool:
         """Grant a capability to a plugin. Returns True if successful."""
@@ -575,6 +624,9 @@ if __name__ == "__main__":
 
                 self._plugins[rec.name] = rec
                 self._logger(f"[SYS] [PluginLoader] Plugin reloaded: {rec.name} ({path.name}, reload #{rec._reload_count})")
+
+                # Call on_reload hook
+                self._call_lifecycle_hook(rec, "on_reload")
             else:
                 self._logger(f"[SYS] [PluginLoader] Plugin reload failed: {path.name} — {rec.error}")
                 # Remove from plugins if it was there before
@@ -590,6 +642,11 @@ if __name__ == "__main__":
 
     def _unload_plugin(self, name: str) -> None:
         """Unload a plugin when its file is deleted."""
+        # Call on_unload hook before removing
+        old_rec = self._plugins.get(name)
+        if old_rec:
+            self._call_lifecycle_hook(old_rec, "on_unload")
+
         if name in self._plugins:
             del self._plugins[name]
             self._logger(f"[SYS] [PluginLoader] Plugin unloaded: {name}")
@@ -799,12 +856,18 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
             rec._last_modified = path.stat().st_mtime
             valid[rec.name] = rec
             logger(f"Plugin loaded: {rec.name} ({path.name})")
+            # Call on_load hook after plugin is registered
+            # We need to call this after the registry is created, so we'll do it later
         else:
             logger(f"Plugin rejected: {path.name} — {rec.error}")
 
     notify = notify or (lambda _msg: None)
     registry = PluginRegistry(valid, logger, notify)
     registry._all_records = all_records
+
+    # Phase 2: Call on_load hooks for all valid plugins
+    for rec in valid.values():
+        registry._call_lifecycle_hook(rec, "on_load")
 
     # Phase 2: Load granted capabilities from config
     registry.load_granted_capabilities()
