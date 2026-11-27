@@ -678,6 +678,80 @@ if __name__ == "__main__":
             if isinstance(granted, list):
                 rec.granted_capabilities = [c for c in granted if c in _VALID_CAPABILITIES]
 
+    # Phase 2: Plugin export/import (configuration migration)
+    def export_plugin_config(self, plugin_name: str) -> dict:
+        """Export a plugin's configuration for backup/migration.
+
+        Returns dict with: capabilities, granted_capabilities, debug, settings, metadata
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        from memory.config_manager import get_plugin_config
+        settings = get_plugin_config(plugin_name)
+
+        return {
+            "name": rec.name,
+            "version": rec.version,
+            "file": rec.file,
+            "capabilities": rec.capabilities,
+            "granted_capabilities": rec.granted_capabilities,
+            "debug": rec.debug,
+            "sandboxed": rec.sandboxed,
+            "sandbox_timeout": rec.sandbox_timeout,
+            "sandbox_memory_mb": rec.sandbox_memory_mb,
+            "settings": settings,
+            "exported_at": time.time(),
+        }
+
+    def export_all_configs(self) -> dict:
+        """Export all plugin configurations."""
+        return {
+            "plugins": {name: self.export_plugin_config(name) for name in self._plugins},
+            "version": "1.2.0",
+        }
+
+    def import_plugin_config(self, plugin_name: str, config: dict) -> bool:
+        """Import a plugin's configuration from backup/migration."""
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        # Restore capabilities
+        if "granted_capabilities" in config:
+            rec.granted_capabilities = [
+                c for c in config["granted_capabilities"] if c in _VALID_CAPABILITIES
+            ]
+
+        # Restore debug mode
+        if "debug" in config:
+            rec.debug = bool(config["debug"])
+
+        # Restore sandbox settings (if provided in config)
+        if "sandboxed" in config:
+            rec.sandboxed = bool(config["sandboxed"])
+        if "sandbox_timeout" in config:
+            rec.sandbox_timeout = int(config["sandbox_timeout"])
+        if "sandbox_memory_mb" in config:
+            rec.sandbox_memory_mb = int(config["sandbox_memory_mb"])
+
+        # Save capabilities to config
+        if "granted_capabilities" in config:
+            from memory.config_manager import get_plugin_config, save_plugin_config
+            cfg = get_plugin_config(plugin_name)
+            cfg["granted_capabilities"] = rec.granted_capabilities
+            save_plugin_config(plugin_name, cfg)
+
+        # Restore settings
+        if "settings" in config:
+            from memory.config_manager import save_plugin_config
+            for key, value in config["settings"].items():
+                save_plugin_config(plugin_name, {key: value})
+
+        self._logger(f"[SYS] [PluginLoader] Imported config for '{plugin_name}'")
+        return True
+
     # Phase 2: Hot-reload via filesystem watchdog
     def start_hot_reload(self, plugins_dir: Path, core_tool_names: set[str]) -> bool:
         """Start watching the plugins directory for changes.
