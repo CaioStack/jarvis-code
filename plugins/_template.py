@@ -26,6 +26,14 @@ ONE RULE IF YOUR PLUGIN NEEDS TO ASK A MODEL SOMETHING
 
 PLUGIN = {
     "name": "my_plugin",                     # snake_case, unique, ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$
+    "version": "1.0.0",                      # semantic version
+    "author": "Your Name",                   # plugin author
+    "license": "MIT",                        # SPDX license identifier
+    "homepage": "https://example.com",       # plugin homepage/docs
+    "repository": "https://github.com/user/repo",  # source code
+    "keywords": ["example", "demo"],         # for discovery
+    "dependencies": [],                      # pip packages needed (installed by user)
+    "min_jarvis_version": "1.1.0",           # minimum Jarvis version required
     "description": (
         "One or two sentences Gemini uses to decide when to call this tool. "
         "Be explicit about trigger phrases and, if it could be confused with "
@@ -39,6 +47,26 @@ PLUGIN = {
         },
         "required": [],   # omit or leave empty for a zero-argument tool
     },
+    # Phase 2: Capabilities — declare what permissions this plugin needs.
+    # User must grant each capability in the Plugin Manager before the plugin can run.
+    # Available capabilities:
+    #   filesystem.read, filesystem.write, filesystem.delete, filesystem.list
+    #   network.http, network.websocket, network.raw
+    #   shell.exec, process.spawn, process.signal
+    #   ui.notify, ui.input, input.keyboard, input.mouse
+    #   audio.record, audio.play, video.record
+    #   memory.read, memory.write, config.read, config.write
+    #   plugin.call, plugin.discover
+    "capabilities": [
+        # "filesystem.read",
+        # "network.http",
+    ],
+    # Phase 2: Sandbox — run plugin in isolated subprocess with resource limits.
+    # When sandboxed=True, the plugin executes in a separate process with timeout
+    # and memory limits. Requires all capabilities to be granted.
+    "sandboxed": False,
+    "sandbox_timeout": 30,      # seconds
+    "sandbox_memory_mb": 256,   # memory limit (Linux only, requires cgroups)
 }
 
 def run(parameters: dict, player=None, session_memory=None) -> str:
