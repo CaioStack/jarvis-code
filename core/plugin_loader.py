@@ -3660,6 +3660,225 @@ if __name__ == "__main__":
         self._logger(f"[SYS] [PluginLoader] Restored backup for '{plugin_name}'")
         return True
 
+    # Phase 2: Plugin versioning and changelog
+    def get_plugin_changelog(self, plugin_name: str) -> list:
+        """Get plugin changelog from repository or local metadata.
+
+        Returns list of version entries with: version, date, changes
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return []
+
+        # Check for local CHANGELOG in plugin module
+        module_name = f"plugins.{rec.name}"
+        import sys
+        module = sys.modules.get(module_name)
+        if module:
+            changelog = getattr(module, "CHANGELOG", None)
+            if changelog:
+                return changelog
+
+        # Try to fetch from GitHub releases
+        if rec.repository and "github.com" in rec.repository:
+            return self._fetch_github_changelog(rec.repository)
+
+        return []
+
+    def _fetch_github_changelog(self, repo_url: str) -> list:
+        """Fetch changelog from GitHub releases."""
+        import re
+        try:
+            import httpx
+        except ImportError:
+            return []
+
+        match = re.search(r"github\.com[:/]([^/]+)/([^/\.]+)", repo_url)
+        if not match:
+            return []
+
+        owner, repo = match.groups()
+        repo = repo.replace(".git", "")
+
+        try:
+            response = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}/releases",
+                params={"per_page": 20},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                return []
+
+            releases = response.json()
+            changelog = []
+            for release in releases:
+                changelog.append({
+                    "version": release.get("tag_name", "").lstrip("v"),
+                    "date": release.get("published_at", ""),
+                    "changes": release.get("body", ""),
+                    "url": release.get("html_url", ""),
+                    "prerelease": release.get("prerelease", False),
+                })
+            return changelog
+        except Exception:
+            return []
+
+    def compare_plugin_versions(self, plugin_name: str, version_a: str, version_b: str) -> dict:
+        """Compare two plugin versions.
+
+        Returns dict with: version_a, version_b, newer, differences
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        def parse_version(v):
+            return tuple(int(x) for x in v.split('.')[:3])
+
+        v_a = parse_version(version_a)
+        v_b = parse_version(version_b)
+
+        if v_a > v_b:
+            newer = version_a
+        elif v_b > v_a:
+            newer = version_b
+        else:
+            newer = "equal"
+
+        changelog = self.get_plugin_changelog(plugin_name)
+        # Find changes between versions
+        changes_between = []
+        for entry in changelog:
+            entry_ver = parse_version(entry.get("version", "0.0.0"))
+            if v_a < entry_ver <= v_b or v_b < entry_ver <= v_a:
+                changes_between.append(entry)
+
+        return {
+            "version_a": version_a,
+            "version_b": version_b,
+            "newer": newer,
+            "changes_between": changes_between,
+        }
+
+    # Phase 2: Plugin marketplace with ratings/reviews
+    def submit_plugin_rating(self, plugin_name: str, rating: int,
+                              review: str = "", user_id: str = None) -> bool:
+        """Submit a rating/review for a plugin (local storage).
+
+        Args:
+            plugin_name: Name of the plugin
+            rating: Rating 1-5
+            review: Optional review text
+            user_id: Optional user identifier
+
+        Returns True if submitted.
+        """
+        if not 1 <= rating <= 5:
+            return False
+
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "ratings" not in config:
+            config["ratings"] = []
+
+        import time
+        config["ratings"].append({
+            "rating": rating,
+            "review": review,
+            "user_id": user_id,
+            "timestamp": time.time(),
+        })
+
+        # Keep only last 1000 ratings
+        config["ratings"] = config["ratings"][-1000:]
+        save_plugin_config(plugin_name, config)
+        return True
+
+    def get_plugin_ratings(self, plugin_name: str) -> dict:
+        """Get ratings and reviews for a plugin."""
+        from memory.config_manager import get_plugin_config
+
+        config = get_plugin_config(plugin_name)
+        ratings = config.get("ratings", [])
+
+        if not ratings:
+            return {"average": 0, "count": 0, "distribution": {}, "reviews": []}
+
+        total = sum(r["rating"] for r in ratings)
+        count = len(ratings)
+        average = total / count if count > 0 else 0
+
+        # Distribution
+        dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+        for r in ratings:
+            dist[r["rating"]] = dist.get(r["rating"], 0) + 1
+
+        # Recent reviews
+        reviews = [r for r in ratings if r.get("review")]
+        reviews.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+
+        return {
+            "average": round(average, 2),
+            "count": count,
+            "distribution": dist,
+            "reviews": reviews[:10],  # Last 10 reviews
+        }
+
+    def get_marketplace_plugins(self) -> dict:
+        """Get all plugins formatted for marketplace display."""
+        marketplace = []
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                ratings = self.get_plugin_ratings(name)
+                health = self.get_plugin_health(name)
+                marketplace.append({
+                    "name": name,
+                    "version": rec.version,
+                    "description": rec.description,
+                    "author": rec.author,
+                    "license": rec.license,
+                    "homepage": rec.homepage,
+                    "repository": rec.repository,
+                    "keywords": rec.keywords,
+                    "capabilities": rec.capabilities,
+                    "sandboxed": rec.sandboxed,
+                    "category": rec.category,
+                    "tags": rec.tags,
+                    "favorite": rec.favorite,
+                    "rating": ratings.get("average", 0),
+                    "rating_count": ratings.get("count", 0),
+                    "health_status": health.get("status", "unknown"),
+                    "verified": rec.verified,
+                    "signer": rec.signer,
+                })
+
+        return {
+            "total": len(marketplace),
+            "plugins": marketplace,
+        }
+
+    # Phase 2: Plugin update notifications
+    def check_for_updates_with_notification(self, plugin_name: str) -> dict:
+        """Check for plugin updates and create notification if available."""
+        result = self.check_plugin_updates(plugin_name)
+        if result.get("has_update"):
+            self._notify(f"Update available for plugin '{plugin_name}': {result['current_version']} -> {result['latest_version']}")
+            # Also trigger webhook
+            self._trigger_webhooks(plugin_name, "plugin_updated", result)
+        return result
+
+    def check_all_updates_notify(self) -> dict:
+        """Check all plugins for updates and notify."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.valid and rec.repository:
+                results[name] = self.check_for_updates_with_notification(name)
+        return results
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
