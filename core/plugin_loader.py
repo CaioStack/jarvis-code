@@ -197,6 +197,26 @@ class PluginRecord:
     # Phase 2: Priority/ordering
     priority: int = 0  # execution priority (higher = runs first), 0 = default
 
+    # Phase 2: Circuit breaker
+    circuit_breaker_threshold: int = 5  # failures before opening circuit
+    circuit_breaker_timeout: int = 60   # seconds before half-open
+    _failure_streak: int = 0
+    _circuit_open_at: float = 0
+    _circuit_state: str = "closed"  # closed, open, half-open
+
+    # Phase 2: Retry policy
+    max_retries: int = 0
+    retry_delay: float = 1.0
+    retry_backoff: float = 2.0
+
+    # Phase 2: Resource quotas
+    cpu_quota_percent: float = 0.0  # 0 = unlimited
+    memory_quota_mb: int = 0        # 0 = unlimited
+    disk_quota_mb: int = 0          # 0 = unlimited
+
+    # Phase 2: Audit logging
+    audit_log: bool = False
+
 
 class PluginRegistry:
     def __init__(self, plugins: dict[str, PluginRecord], logger: Callable[[str], None],
@@ -306,9 +326,57 @@ class PluginRegistry:
                 return f"Plugin '{name}' rate limit exceeded ({rec.rate_limit} calls/minute). Please wait."
             rec._call_timestamps.append(now)
 
+        # Phase 2: Resource quota enforcement
+        import time
+        import os
+        try:
+            if rec.cpu_quota_percent > 0 or rec.memory_quota_mb > 0 or rec.disk_quota_mb > 0:
+                import psutil
+                process = psutil.Process()
+
+                # Check CPU quota
+                if rec.cpu_quota_percent > 0:
+                    cpu_percent = process.cpu_percent(interval=0.1)
+                    if cpu_percent > rec.cpu_quota_percent:
+                        return f"Plugin '{name}' exceeded CPU quota ({cpu_percent:.1f}% > {rec.cpu_quota_percent}%)."
+
+                # Check memory quota
+                if rec.memory_quota_mb > 0:
+                    mem_info = process.memory_info()
+                    mem_mb = mem_info.rss / (1024 * 1024)
+                    if mem_mb > rec.memory_quota_mb:
+                        return f"Plugin '{name}' exceeded memory quota ({mem_mb:.1f}MB > {rec.memory_quota_mb}MB)."
+
+                # Check disk quota (approximate - check current working directory)
+                if rec.disk_quota_mb > 0:
+                    try:
+                        stat = os.statvfs('.')
+                        free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+                        # This is a rough check - in practice you'd track plugin-specific disk usage
+                        if free_mb < rec.disk_quota_mb:
+                            return f"Plugin '{name}' disk quota check failed: only {free_mb:.1f}MB free (need {rec.disk_quota_mb}MB)."
+                    except Exception:
+                        pass  # Disk quota check failed, continue anyway
+        except ImportError:
+            self._logger(f"[SYS] [PluginLoader] psutil not available, skipping resource quota checks for '{name}'")
+        except Exception as e:
+            self._logger(f"[SYS] [PluginLoader] Resource quota check failed for '{name}': {e}")
+
         # Phase 2: Debug logging
         if rec.debug:
             self._logger(f"[SYS] [PluginLoader] DEBUG: Running '{name}' with params: {parameters}")
+
+        # Phase 2: Circuit breaker check
+        if rec._circuit_state == "open":
+            import time
+            if time.time() - rec._circuit_open_at >= rec.circuit_breaker_timeout:
+                rec._circuit_state = "half-open"
+                self._logger(f"[SYS] [PluginLoader] Circuit breaker for '{name}' moved to half-open")
+            else:
+                return f"Plugin '{name}' circuit breaker is OPEN. Try again later."
+        elif rec._circuit_state == "half-open":
+            # Allow one request through in half-open state
+            pass
 
         # Phase 2: Performance tracking
         import time
@@ -323,46 +391,81 @@ class PluginRegistry:
         # Phase 2: Trigger before_run hook
         self._trigger_hook("before_run", name, parameters)
 
-        try:
-            if rec.sandboxed:
-                result = self._run_sandboxed(rec, parameters, player, session_memory)
-            else:
-                result = _call_run(rec.run, parameters, player, session_memory) or "Done."
+        # Phase 2: Retry logic
+        last_error = None
+        for attempt in range(rec.max_retries + 1):
+            try:
+                if rec.sandboxed:
+                    result = self._run_sandboxed(rec, parameters, player, session_memory)
+                else:
+                    result = _call_run(rec.run, parameters, player, session_memory) or "Done."
 
-            # Track successful run
-            elapsed = time.perf_counter() - start_time
-            rec._run_count += 1
-            rec._total_run_time += elapsed
-            rec._last_run_time = elapsed
-            rec._last_error = ""
-            rec._success_count += 1
-            rec._last_success = now
+                # Track successful run
+                elapsed = time.perf_counter() - start_time
+                rec._run_count += 1
+                rec._total_run_time += elapsed
+                rec._last_run_time = elapsed
+                rec._last_error = ""
+                rec._success_count += 1
+                rec._last_success = now
 
-            # Phase 2: Trigger after_run hook
-            self._trigger_hook("after_run", name, parameters, result, elapsed)
+                # Phase 2: Circuit breaker - reset failure streak on success
+                rec._failure_streak = 0
+                if rec._circuit_state == "half-open":
+                    rec._circuit_state = "closed"
+                    self._logger(f"[SYS] [PluginLoader] Circuit breaker for '{name}' CLOSED")
 
-            # Phase 2: Debug logging for result
-            if rec.debug:
-                self._logger(f"[SYS] [PluginLoader] DEBUG: '{name}' completed in {elapsed*1000:.2f}ms: {result[:100]}")
-            return result
+                # Phase 2: Trigger after_run hook
+                self._trigger_hook("after_run", name, parameters, result, elapsed)
 
-        except Exception as e:
-            # Track failed run
-            elapsed = time.perf_counter() - start_time
-            rec._run_count += 1
-            rec._total_run_time += elapsed
-            rec._last_run_time = elapsed
-            rec._last_error = str(e)
-            rec._failure_count += 1
-            rec._last_failure = now
+                # Phase 2: Debug logging for result
+                if rec.debug:
+                    self._logger(f"[SYS] [PluginLoader] DEBUG: '{name}' completed in {elapsed*1000:.2f}ms: {result[:100]}")
 
-            # Phase 2: Trigger plugin_error hook
-            self._trigger_hook("plugin_error", name, e)
+                # Phase 2: Audit logging
+                if rec.audit_log:
+                    self._logger(f"[AUDIT] Plugin '{name}' executed successfully | params={parameters} | result={result[:200]} | elapsed={elapsed*1000:.2f}ms")
 
-            self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
-            self._notify(f"Plugin '{name}' failed — see the console for details.")
-            traceback.print_exc()
-            return f"Sir, the '{name}' plugin failed: {e}"
+                return result
+
+            except Exception as e:
+                last_error = e
+                elapsed = time.perf_counter() - start_time
+
+                # Phase 2: Circuit breaker - increment failure streak
+                rec._failure_streak += 1
+                if rec._failure_streak >= rec.circuit_breaker_threshold:
+                    rec._circuit_state = "open"
+                    rec._circuit_open_at = time.time()
+                    self._logger(f"[SYS] [PluginLoader] Circuit breaker for '{name}' OPENED after {rec._failure_streak} failures")
+
+                if attempt < rec.max_retries:
+                    # Wait before retry with exponential backoff
+                    import time
+                    wait_time = rec.retry_delay * (rec.retry_backoff ** attempt)
+                    self._logger(f"[SYS] [PluginLoader] Plugin '{name}' attempt {attempt + 1} failed, retrying in {wait_time:.1f}s: {e}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # All retries exhausted
+                    rec._run_count += 1
+                    rec._total_run_time += elapsed
+                    rec._last_run_time = elapsed
+                    rec._last_error = str(e)
+                    rec._failure_count += 1
+                    rec._last_failure = now
+
+                    # Phase 2: Trigger plugin_error hook
+                    self._trigger_hook("plugin_error", name, e)
+
+                    # Phase 2: Audit logging for failures
+                    if rec.audit_log:
+                        self._logger(f"[AUDIT] Plugin '{name}' FAILED | params={parameters} | error={e} | elapsed={elapsed*1000:.2f}ms | attempt={attempt+1}/{rec.max_retries+1}")
+
+                    self._logger(f"[SYS] [PluginLoader] Plugin '{name}' crashed during run(): {e}")
+                    self._notify(f"Plugin '{name}' failed — see the console for details.")
+                    traceback.print_exc()
+                    return f"Sir, the '{name}' plugin failed: {e}"
 
     def _run_sandboxed(self, rec: PluginRecord, parameters: dict, player, session_memory) -> str:
         """Execute plugin in isolated subprocess with resource limits."""
