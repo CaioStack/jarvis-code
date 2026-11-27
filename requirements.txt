@@ -64,6 +64,7 @@ qrcode[pil]>=7,<9
 # it work on the next launch, not send you back to pip. Every one of these is
 # imported inside a try/except at the point of use, so an uninstalled extra
 # disables exactly one plugin and never touches the rest of the app.
+watchdog>=4,<5               # plugin_loader — filesystem hot-reload
 google-api-python-client     # gmail_control, calendar_control — OAuth
 google-auth-oauthlib         # gmail_control, calendar_control — OAuth
 tinytuya                     # home_assistant — Tuya / Smart Life bulbs
