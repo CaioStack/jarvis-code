@@ -429,6 +429,46 @@ if __name__ == "__main__":
         """Get health status for all plugins."""
         return {name: self.get_plugin_health(name) for name in self._plugins}
 
+    # Phase 2: Plugin-to-plugin communication
+    def call_plugin(self, caller_name: str, target_name: str, parameters: dict,
+                     player=None, session_memory=None) -> str:
+        """Call another plugin (requires plugin.call capability).
+
+        This allows plugins to invoke other plugins programmatically.
+        """
+        caller_rec = self._plugins.get(caller_name)
+        if not caller_rec:
+            return f"Caller plugin '{caller_name}' not found"
+
+        # Check plugin.call capability
+        if "plugin.call" not in caller_rec.granted_capabilities:
+            return f"Plugin '{caller_name}' lacks 'plugin.call' capability"
+
+        target_rec = self._plugins.get(target_name)
+        if not target_rec or not target_rec.valid:
+            return f"Target plugin '{target_name}' not available"
+
+        if not get_plugin_enabled(target_name):
+            return f"Target plugin '{target_name}' is disabled"
+
+        # Execute the target plugin
+        try:
+            return _call_run(target_rec.run, parameters, player, session_memory) or "Done."
+        except Exception as e:
+            return f"Plugin '{target_name}' failed: {e}"
+
+    def list_available_plugins(self) -> list[dict]:
+        """List all available plugins for plugin.discover capability."""
+        plugins = []
+        for name, rec in self._plugins.items():
+            if rec.valid and get_plugin_enabled(name):
+                plugins.append({
+                    "name": name,
+                    "description": rec.description,
+                    "parameters": rec.parameters,
+                })
+        return plugins
+
     # Phase 2: Plugin lifecycle hooks
     def _call_lifecycle_hook(self, rec: PluginRecord, hook_name: str) -> bool:
         """Call a lifecycle hook on a plugin if it exists.
