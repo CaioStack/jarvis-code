@@ -4031,6 +4031,209 @@ if __name__ == "__main__":
 
         return result
 
+    # Phase 2: Plugin feature flags / gradual rollout
+    def set_feature_flag(self, plugin_name: str, flag_name: str, enabled: bool,
+                          rollout_percentage: float = 100.0, user_segments: list = None) -> bool:
+        """Set a feature flag for gradual rollout.
+
+        Args:
+            plugin_name: Name of the plugin
+            flag_name: Feature flag name
+            enabled: Whether the feature is enabled
+            rollout_percentage: Percentage of users to roll out to (0-100)
+            user_segments: Optional list of user segments (e.g., ["beta", "premium"])
+
+        Returns True if successful.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        config = get_plugin_config(plugin_name)
+        if "feature_flags" not in config:
+            config["feature_flags"] = {}
+
+        config["feature_flags"][flag_name] = {
+            "enabled": enabled,
+            "rollout_percentage": max(0.0, min(100.0, rollout_percentage)),
+            "user_segments": user_segments or [],
+            "updated_at": time.time(),
+        }
+        save_plugin_config(plugin_name, config)
+
+        self._logger(f"[SYS] [PluginLoader] Feature flag '{flag_name}' for '{plugin_name}': {'enabled' if enabled else 'disabled'} ({rollout_percentage}% rollout)")
+        return True
+
+    def get_feature_flag(self, plugin_name: str, flag_name: str, user_id: str = None,
+                          user_segments: list = None) -> bool:
+        """Check if a feature flag is enabled for a user.
+
+        Args:
+            plugin_name: Name of the plugin
+            flag_name: Feature flag name
+            user_id: User ID for consistent hashing
+            user_segments: User's segments
+
+        Returns True if feature is enabled for this user.
+        """
+        from memory.config_manager import get_plugin_config
+        import hashlib
+
+        config = get_plugin_config(plugin_name)
+        flags = config.get("feature_flags", {})
+        flag = flags.get(flag_name, {})
+
+        if not flag.get("enabled", False):
+            return False
+
+        # Check user segments
+        user_segments = user_segments or []
+        flag_segments = flag.get("user_segments", [])
+        if flag_segments and not any(seg in flag_segments for seg in user_segments):
+            return False
+
+        # Check rollout percentage using consistent hashing
+        rollout = flag.get("rollout_percentage", 100.0)
+        if rollout >= 100.0:
+            return True
+
+        if user_id:
+            # Consistent hash based on user_id + flag_name
+            hash_input = f"{plugin_name}:{flag_name}:{user_id}"
+            hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+            user_percentile = (hash_value % 10000) / 100.0  # 0-100
+            return user_percentile < rollout
+
+        return False
+
+    def list_feature_flags(self, plugin_name: str) -> dict:
+        """List all feature flags for a plugin."""
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        return config.get("feature_flags", {})
+
+    # Phase 2: Plugin rate limiting with token bucket
+    def check_rate_limit_token_bucket(self, plugin_name: str, tokens: int = 1) -> tuple[bool, float]:
+        """Check rate limit using token bucket algorithm.
+
+        More sophisticated than simple sliding window - allows burst traffic
+        while maintaining average rate.
+
+        Args:
+            plugin_name: Name of the plugin
+            tokens: Number of tokens to consume (default 1)
+
+        Returns (allowed, retry_after_seconds).
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return False, 0.0
+
+        if rec.rate_limit <= 0:
+            return True, 0.0
+
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        import time
+
+        config = get_plugin_config(plugin_name)
+        bucket = config.get("token_bucket", {
+            "tokens": float(rec.rate_limit),
+            "last_refill": time.time(),
+        })
+
+        # Refill tokens based on time elapsed
+        now = time.time()
+        elapsed = now - bucket["last_refill"]
+        refill_rate = rec.rate_limit / 60.0  # tokens per second
+        bucket["tokens"] = min(rec.rate_limit, bucket["tokens"] + elapsed * refill_rate)
+        bucket["last_refill"] = now
+
+        if bucket["tokens"] >= tokens:
+            bucket["tokens"] -= tokens
+            config["token_bucket"] = bucket
+            save_plugin_config(plugin_name, config)
+            return True, 0.0
+
+        # Not enough tokens
+        retry_after = (tokens - bucket["tokens"]) / refill_rate
+        config["token_bucket"] = bucket
+        save_plugin_config(plugin_name, config)
+        return False, retry_after
+
+    # Phase 2: Plugin metrics aggregation for dashboards
+    def get_aggregated_metrics(self, interval: str = "1h") -> dict:
+        """Get aggregated metrics across all plugins for dashboard.
+
+        Args:
+            interval: Aggregation interval (1m, 5m, 1h, 1d)
+
+        Returns dict with aggregated metrics.
+        """
+        import time
+
+        interval_seconds = {
+            "1m": 60,
+            "5m": 300,
+            "1h": 3600,
+            "1d": 86400,
+        }.get(interval, 3600)
+
+        cutoff = time.time() - interval_seconds
+
+        total_runs = 0
+        total_errors = 0
+        total_latency = 0.0
+        plugin_metrics = {}
+
+        for name, rec in self._plugins.items():
+            if not rec.valid:
+                continue
+
+            # Get events in interval
+            events = self.get_plugin_event_log(name, limit=10000)
+            recent_events = [e for e in events if e.get("timestamp", 0) > cutoff]
+
+            runs = len([e for e in recent_events if e.get("event_type") == "run_start"])
+            errors = len([e for e in recent_events if e.get("event_type") == "run_error"])
+
+            # Calculate avg latency from run_end events
+            latencies = []
+            for e in recent_events:
+                if e.get("event_type") == "run_end":
+                    data = e.get("data", {})
+                    if "elapsed" in data:
+                        latencies.append(data["elapsed"])
+
+            avg_latency = sum(latencies) / len(latencies) if latencies else 0
+
+            total_runs += runs
+            total_errors += errors
+            total_latency += avg_latency * runs
+
+            if runs > 0:
+                plugin_metrics[name] = {
+                    "runs": runs,
+                    "errors": errors,
+                    "success_rate": ((runs - errors) / runs * 100) if runs > 0 else 0,
+                    "avg_latency_ms": avg_latency * 1000,
+                }
+
+        overall_avg_latency = total_latency / total_runs if total_runs > 0 else 0
+
+        return {
+            "interval": interval,
+            "interval_seconds": interval_seconds,
+            "total_plugins": len(self._plugins),
+            "active_plugins": len([p for p in self._plugins.values() if p.valid]),
+            "total_runs": total_runs,
+            "total_errors": total_errors,
+            "overall_success_rate": ((total_runs - total_errors) / total_runs * 100) if total_runs > 0 else 0,
+            "overall_avg_latency_ms": overall_avg_latency * 1000,
+            "by_plugin": plugin_metrics,
+            "generated_at": time.time(),
+        }
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
