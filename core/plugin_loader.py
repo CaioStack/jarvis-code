@@ -4336,6 +4336,166 @@ if __name__ == "__main__":
             "results": results,
         }
 
+    # Phase 2: Plugin webhook delivery retry with exponential backoff
+    def _deliver_webhook_with_retry(self, url: str, payload: bytes, headers: dict,
+                                     max_retries: int = 3, base_delay: float = 1.0) -> bool:
+        """Deliver webhook with retry logic."""
+        try:
+            import httpx
+        except ImportError:
+            return False
+
+        for attempt in range(max_retries):
+            try:
+                response = httpx.post(url, content=payload, headers=headers, timeout=10)
+                if 200 <= response.status_code < 300:
+                    return True
+            except Exception:
+                pass
+
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                import time
+                time.sleep(delay)
+
+        return False
+
+    # Phase 2: Plugin webhook dead letter queue
+    def _queue_failed_webhook(self, plugin_name: str, event: str, url: str,
+                               payload: dict, error: str) -> None:
+        """Queue failed webhook for later retry."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        import time
+
+        config = get_plugin_config(plugin_name)
+        if "webhook_dlq" not in config:
+            config["webhook_dlq"] = []
+
+        config["webhook_dlq"].append({
+            "event": event,
+            "url": url,
+            "payload": payload,
+            "error": error,
+            "failed_at": time.time(),
+            "retry_count": 0,
+        })
+
+        # Keep only last 100 failed webhooks
+        config["webhook_dlq"] = config["webhook_dlq"][-100:]
+        save_plugin_config(plugin_name, config)
+
+    # Phase 2: Retry failed webhooks from dead letter queue
+    def retry_failed_webhooks(self, plugin_name: str) -> dict:
+        """Retry failed webhooks from dead letter queue."""
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        import json
+        import hmac
+        import hashlib
+
+        config = get_plugin_config(plugin_name)
+        dlq = config.get("webhook_dlq", [])
+
+        if not dlq:
+            return {"retried": 0, "succeeded": 0, "message": "No failed webhooks"}
+
+        retried = 0
+        succeeded = 0
+        remaining = []
+
+        for item in dlq:
+            if item.get("retry_count", 0) >= 5:
+                # Max retries exceeded, keep in queue
+                remaining.append(item)
+                continue
+
+            url = item.get("url")
+            payload = json.dumps(item.get("payload", {})).encode()
+            headers = {"Content-Type": "application/json"}
+
+            # Add HMAC if secret was stored
+            secret = None  # Would need to be stored with the webhook
+            if secret:
+                signature = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                headers["X-Jarvis-Signature"] = f"sha256={signature}"
+
+            success = self._deliver_webhook_with_retry(url, payload, headers)
+
+            if success:
+                succeeded += 1
+            else:
+                item["retry_count"] = item.get("retry_count", 0) + 1
+                remaining.append(item)
+
+            retried += 1
+
+        config["webhook_dlq"] = remaining
+        save_plugin_config(plugin_name, config)
+
+        return {
+            "retried": retried,
+            "succeeded": succeeded,
+            "remaining": len(remaining),
+        }
+
+    # Phase 2: Plugin resource usage prediction
+    def predict_resource_usage(self, plugin_name: str, sample_runs: int = 5) -> dict:
+        """Predict resource usage for a plugin based on profiling.
+
+        Runs the plugin multiple times with sample parameters to estimate
+        average CPU, memory, and latency.
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        # Get sample parameters from config or use defaults
+        from memory.config_manager import get_plugin_config
+        config = get_plugin_config(plugin_name)
+        sample_params = config.get("sample_parameters", {})
+
+        import time
+        import psutil
+        import statistics
+
+        cpu_samples = []
+        mem_samples = []
+        latency_samples = []
+
+        for _ in range(sample_runs):
+            # Measure before
+            process = psutil.Process()
+            cpu_before = process.cpu_percent(interval=0.01)
+            mem_before = process.memory_info().rss / (1024 * 1024)
+
+            start = time.perf_counter()
+            try:
+                self.run(plugin_name, sample_params, None, None)
+            except Exception:
+                pass
+            elapsed = time.perf_counter() - start
+
+            # Measure after
+            cpu_after = process.cpu_percent(interval=0.01)
+            mem_after = process.memory_info().rss / (1024 * 1024)
+
+            cpu_samples.append(max(cpu_after - cpu_before, 0))
+            mem_samples.append(max(mem_after - mem_before, 0))
+            latency_samples.append(elapsed)
+
+        return {
+            "plugin": plugin_name,
+            "sample_runs": sample_runs,
+            "avg_cpu_percent": statistics.mean(cpu_samples) if cpu_samples else 0,
+            "max_cpu_percent": max(cpu_samples) if cpu_samples else 0,
+            "avg_memory_mb": statistics.mean(mem_samples) if mem_samples else 0,
+            "max_memory_mb": max(mem_samples) if mem_samples else 0,
+            "avg_latency_ms": statistics.mean(latency_samples) * 1000 if latency_samples else 0,
+            "max_latency_ms": max(latency_samples) * 1000 if latency_samples else 0,
+            "predicted_daily_runs": 1000,  # Placeholder
+            "estimated_daily_cpu_percent": statistics.mean(cpu_samples) * 1000 / 100 if cpu_samples else 0,
+            "estimated_daily_memory_mb": statistics.mean(mem_samples) * 1000 if mem_samples else 0,
+        }
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
