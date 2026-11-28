@@ -4234,6 +4234,108 @@ if __name__ == "__main__":
             "generated_at": time.time(),
         }
 
+    # Phase 2: Plugin security policy enforcement
+    def enforce_security_policy(self, plugin_name: str, policy: dict) -> dict:
+        """Enforce a security policy on a plugin.
+
+        Policy can contain:
+            - max_capabilities: Maximum number of capabilities allowed
+            - forbidden_capabilities: List of capabilities that are never allowed
+            - required_capabilities: Capabilities that must be granted
+            - require_signature: Require cryptographic signature
+            - allowed_trust_levels: List of allowed trust levels
+            - max_sandbox_timeout: Maximum sandbox timeout allowed
+            - max_memory_mb: Maximum sandbox memory allowed
+            - require_audit_log: Require audit logging
+
+        Returns dict with: compliant, violations, recommendations
+        """
+        rec = self._plugins.get(plugin_name)
+        if not rec:
+            return {"error": f"Plugin '{plugin_name}' not found"}
+
+        violations = []
+        recommendations = []
+
+        # Check max capabilities
+        if "max_capabilities" in policy:
+            if len(rec.capabilities) > policy["max_capabilities"]:
+                violations.append(f"Plugin declares {len(rec.capabilities)} capabilities, max allowed: {policy['max_capabilities']}")
+
+        # Check forbidden capabilities
+        if "forbidden_capabilities" in policy:
+            forbidden = set(policy["forbidden_capabilities"])
+            declared_forbidden = forbidden & set(rec.capabilities)
+            if declared_forbidden:
+                violations.append(f"Plugin declares forbidden capabilities: {', '.join(declared_forbidden)}")
+
+        # Check required capabilities
+        if "required_capabilities" in policy:
+            required = set(policy["required_capabilities"])
+            missing = required - set(rec.capabilities)
+            if missing:
+                violations.append(f"Plugin missing required capabilities: {', '.join(missing)}")
+
+        # Check signature requirement
+        if policy.get("require_signature", False):
+            if not rec.signature or not rec.verified:
+                violations.append("Plugin requires cryptographic signature but is not signed/verified")
+
+        # Check trust level
+        if "allowed_trust_levels" in policy:
+            from memory.config_manager import get_plugin_config
+            config = get_plugin_config(plugin_name)
+            trust_level = config.get("trust_level", "untrusted")
+            if trust_level not in policy["allowed_trust_levels"]:
+                violations.append(f"Plugin trust level '{trust_level}' not in allowed: {policy['allowed_trust_levels']}")
+
+        # Check sandbox limits
+        if "max_sandbox_timeout" in policy and rec.sandboxed:
+            if rec.sandbox_timeout > policy["max_sandbox_timeout"]:
+                violations.append(f"Sandbox timeout {rec.sandbox_timeout}s exceeds max {policy['max_sandbox_timeout']}s")
+
+        if "max_memory_mb" in policy and rec.sandboxed:
+            if rec.sandbox_memory_mb > policy["max_memory_mb"]:
+                violations.append(f"Sandbox memory {rec.sandbox_memory_mb}MB exceeds max {policy['max_memory_mb']}MB")
+
+        # Check audit log requirement
+        if policy.get("require_audit_log", False) and not rec.audit_log:
+            violations.append("Plugin requires audit_log=True")
+
+        compliant = len(violations) == 0
+
+        # Recommendations
+        if not rec.verified:
+            recommendations.append("Consider signing the plugin for supply chain security")
+        if not rec.audit_log:
+            recommendations.append("Enable audit_log for compliance tracking")
+        if rec.capabilities and not rec.granted_capabilities:
+            recommendations.append("Grant required capabilities in Plugin Manager")
+
+        return {
+            "plugin": plugin_name,
+            "compliant": compliant,
+            "violations": violations,
+            "recommendations": recommendations,
+            "policy": policy,
+            "checked_at": time.time(),
+        }
+
+    def enforce_all_security_policies(self, policy: dict) -> dict:
+        """Enforce security policy on all plugins."""
+        results = {}
+        for name, rec in self._plugins.items():
+            if rec.valid:
+                results[name] = self.enforce_security_policy(name, policy)
+
+        compliant_count = sum(1 for r in results.values() if r.get("compliant", False))
+        return {
+            "total_checked": len(results),
+            "compliant": compliant_count,
+            "non_compliant": len(results) - compliant_count,
+            "results": results,
+        }
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them
